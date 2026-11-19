@@ -112,7 +112,8 @@ Rules:
    completed run removes the worktree it created on its own generated branch when the
    checkout is clean and every commit is on a remote, keeping the branch. A kept
    checkout is named in the run's output with what removing it would lose.
-   Folder projects run in place and reject `--branch`, `--from`, and `--base`.
+   Folder projects run in place and reject `--branch`, `--from`, and `--base`, as does a
+   run started with `--adopt` (see "Continuing finished work").
 3. **One workflow per shell.** Multiple pieces of work = separate invocations with
    separate branches; they cannot conflict because each gets its own worktree.
 4. **The message is the work order.** Write it as you would brief a competent
@@ -193,6 +194,20 @@ archon complete fix/issue-42                                # remove worktree + 
 archon isolation cleanup                                    # prune stale environments (7d)
 archon isolation cleanup --merged                           # prune merged ones now
 ```
+
+To correct a pull request an earlier run opened — a failing check, a merge conflict, a
+review finding — launch the same delivery workflow with `--adopt <that run-id>`. The new
+run reuses the adopted run's worktree and branch, so the same PR is updated instead of a
+new one being opened. Get the run id from `workflow runs --open` (or `workflow get
+<run-id> --json`), and adopt only a terminal run: a still-running or paused run is
+resumed with `workflow resume <run-id>` instead, never adopted.
+
+`--adopt` resolves its own lane, so the lane-choosing flags are refused rather than
+overridden: `--branch`, `--from`/`--from-branch`, `--base` and `--no-worktree` each fail
+with `--adopt and --base are mutually exclusive`. Drop them — the adopted run keeps its
+branch and its PR base, and `--base` would have nothing truthful to set. A run started
+with `--supersedes <run-id>` is the opposite case: it cuts a fresh estate, so `--base`
+applies there.
 
 ## Resuming after failure
 
