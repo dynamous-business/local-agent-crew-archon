@@ -1,5 +1,5 @@
 // @archon-test-isolated
-import type { ProviderRegistry } from '@archon/provider-contract';
+import { NoDefaultProviderError, type ProviderRegistry } from '@archon/provider-contract';
 import { providerRegistry } from '@archon/providers';
 import { describe, test, expect, beforeEach, afterEach, afterAll, mock, spyOn } from 'bun:test';
 import { mkdtemp, mkdir, writeFile, rm, symlink as fsSymlink } from 'fs/promises';
@@ -19,11 +19,17 @@ import {
   validateWorkflowResources,
   validateCommand,
   discoverAvailableCommands,
+  type ValidationConfig,
+  type ValidationIssue,
 } from './validator';
-import type { WorkflowDefinition, DagNode } from './schemas';
+import type { WorkflowDefinition, DagNode, ResolvedWorkflow } from './schemas';
 import { dagNodeSchema } from './schemas';
 import { discoverWorkflows } from './workflow-discovery';
-import { makeTestWorkflow } from './test-utils';
+import type { WorkflowConfig } from './deps';
+import { buildAiProfile } from './model-validation';
+import { resolveWorkflowModelScope } from './node-model-resolution';
+import { assistantModelDefaults, collectRunCredentialRequirements } from './run-preflight';
+import { makeTestResolvedWorkflow, makeTestWorkflow } from './test-utils';
 import { removeTempTree } from '@archon/paths/test-utils';
 import { formatPackagedResourceReference } from './packaged-workflow';
 import { writeFakeBundle } from './test-fake-bundle';
@@ -116,7 +122,13 @@ describe('validateWorkflowResources — command nodes', () => {
     const workflow = makeWorkflow('test', [
       { id: 'step1', kind: 'agent', source: { kind: 'command', name: 'my-command' } } as DagNode,
     ]);
-    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry);
+    const issues = await validateWorkflowResources(
+      workflow,
+      tmpDir,
+      providerRegistry,
+      {},
+      'claude'
+    );
     const errors = issues.filter(i => i.level === 'error');
     expect(errors).toHaveLength(0);
   });
@@ -125,9 +137,15 @@ describe('validateWorkflowResources — command nodes', () => {
     const workflow = makeWorkflow('test', [
       { id: 'step1', kind: 'agent', source: { kind: 'command', name: 'nonexistent' } } as DagNode,
     ]);
-    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry, {
-      loadDefaultCommands: false,
-    });
+    const issues = await validateWorkflowResources(
+      workflow,
+      tmpDir,
+      providerRegistry,
+      {
+        loadDefaultCommands: false,
+      },
+      'claude'
+    );
     const errors = issues.filter(i => i.level === 'error');
     expect(errors).toHaveLength(1);
     expect(errors[0].field).toBe('command');
@@ -139,9 +157,15 @@ describe('validateWorkflowResources — command nodes', () => {
     const workflow = makeWorkflow('test', [
       { id: 'step1', kind: 'agent', source: { kind: 'command', name: 'asist' } } as DagNode,
     ]);
-    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry, {
-      loadDefaultCommands: false,
-    });
+    const issues = await validateWorkflowResources(
+      workflow,
+      tmpDir,
+      providerRegistry,
+      {
+        loadDefaultCommands: false,
+      },
+      'claude'
+    );
     const errors = issues.filter(i => i.level === 'error');
     expect(errors).toHaveLength(1);
     expect(errors[0].suggestions).toContain('assist');
@@ -151,7 +175,13 @@ describe('validateWorkflowResources — command nodes', () => {
     const workflow = makeWorkflow('test', [
       { id: 'step1', kind: 'agent', source: { kind: 'command', name: '../escape' } } as DagNode,
     ]);
-    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry);
+    const issues = await validateWorkflowResources(
+      workflow,
+      tmpDir,
+      providerRegistry,
+      {},
+      'claude'
+    );
     const errors = issues.filter(i => i.level === 'error');
     expect(errors).toHaveLength(1);
     expect(errors[0].message).toContain('Invalid command name');
@@ -169,7 +199,13 @@ describe('validateWorkflowResources — command nodes', () => {
       { id: 'step1', kind: 'agent', source: { kind: 'command', name: command } } as DagNode,
     ]);
 
-    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry);
+    const issues = await validateWorkflowResources(
+      workflow,
+      tmpDir,
+      providerRegistry,
+      {},
+      'claude'
+    );
     expect(issues.filter(issue => issue.level === 'error')).toHaveLength(0);
   });
 
@@ -464,9 +500,15 @@ describe('validateWorkflowResources — loop.command', () => {
     // `.archon/commands/<name>.md` clears Level 3 silently.
     await createCommandFile('my-loop-command');
     const workflow = makeWorkflow('test', [makeLoopCommandNode('step1', 'my-loop-command')]);
-    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry, {
-      loadDefaultCommands: false,
-    });
+    const issues = await validateWorkflowResources(
+      workflow,
+      tmpDir,
+      providerRegistry,
+      {
+        loadDefaultCommands: false,
+      },
+      'claude'
+    );
     const errors = issues.filter(i => i.level === 'error');
     expect(errors).toHaveLength(0);
   });
@@ -477,9 +519,15 @@ describe('validateWorkflowResources — loop.command', () => {
     // already-discovered command names — the same affordance command-nodes get.
     await createCommandFile('archon-ralph-implement');
     const workflow = makeWorkflow('test', [makeLoopCommandNode('step1', 'archon-ralph-implemen')]);
-    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry, {
-      loadDefaultCommands: false,
-    });
+    const issues = await validateWorkflowResources(
+      workflow,
+      tmpDir,
+      providerRegistry,
+      {
+        loadDefaultCommands: false,
+      },
+      'claude'
+    );
     const errors = issues.filter(i => i.level === 'error');
     expect(errors).toHaveLength(1);
     expect(errors[0].field).toBe('loop.command');
@@ -494,9 +542,15 @@ describe('validateWorkflowResources — loop.command', () => {
     // bypass that path. The validator must still flag it with a clear
     // `field: 'loop.command'` error rather than treating it as a missing file.
     const workflow = makeWorkflow('test', [makeLoopCommandNode('step1', '../escape')]);
-    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry, {
-      loadDefaultCommands: false,
-    });
+    const issues = await validateWorkflowResources(
+      workflow,
+      tmpDir,
+      providerRegistry,
+      {
+        loadDefaultCommands: false,
+      },
+      'claude'
+    );
     const errors = issues.filter(i => i.level === 'error');
     expect(errors).toHaveLength(1);
     expect(errors[0].field).toBe('loop.command');
@@ -554,9 +608,15 @@ describe('validateWorkflowResources — loop.command', () => {
     test('resolves a loop.command placed under ~/.archon/commands/', async () => {
       await createHomeCommand('only-in-home-loop');
       const workflow = makeWorkflow('test', [makeLoopCommandNode('step1', 'only-in-home-loop')]);
-      const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry, {
-        loadDefaultCommands: false,
-      });
+      const issues = await validateWorkflowResources(
+        workflow,
+        tmpDir,
+        providerRegistry,
+        {
+          loadDefaultCommands: false,
+        },
+        'claude'
+      );
       const errors = issues.filter(i => i.level === 'error');
       expect(errors).toHaveLength(0);
     });
@@ -2270,16 +2330,20 @@ describe('validateWorkflowResources — loose output schemas', () => {
         {},
         provider
       );
-      expect(issues).toHaveLength(1);
-      expect(issues[0]).toMatchObject({
+      const schemaIssues = issues.filter(i => i.field === 'output_format');
+      expect(schemaIssues).toHaveLength(1);
+      expect(schemaIssues[0]).toMatchObject({
         level: 'warning',
         nodeId: 'classify',
         field: 'output_format',
       });
-      expect(issues[0].message).toContain("Node 'classify'");
-      expect(issues[0].message).toContain('required');
-      expect(issues[0].message).toContain('additionalProperties: false');
-      expect(makeWorkflowResult(workflow.name, issues).valid).toBe(true);
+      expect(schemaIssues[0].message).toContain("Node 'classify'");
+      expect(schemaIssues[0].message).toContain('required');
+      expect(schemaIssues[0].message).toContain('additionalProperties: false');
+      // A loose schema only warns. With no provider anywhere in the chain the node cannot
+      // run, so the workflow is invalid for that reason alone.
+      expect(makeWorkflowResult(workflow.name, schemaIssues).valid).toBe(true);
+      expect(makeWorkflowResult(workflow.name, issues).valid).toBe(provider !== undefined);
     }
   );
 
@@ -2348,5 +2412,138 @@ describe('validateWorkflowResources — loose output schemas', () => {
       'loop',
       'body',
     ]);
+  });
+});
+
+// =============================================================================
+// validateWorkflowResources — provider resolution
+// =============================================================================
+
+describe('validateWorkflowResources — provider resolution', () => {
+  const promptNode = (id: string, extra: Record<string, unknown> = {}): DagNode =>
+    dagNodeSchema.parse({ id, prompt: 'decide', ...extra }) as DagNode;
+  const providerIssues = (issues: ValidationIssue[]) => issues.filter(i => i.field === 'provider');
+
+  test('errors on an unqualified prompt node when no provider resolves', async () => {
+    const issues = await validateWorkflowResources(
+      makeWorkflow('test', [promptNode('classify')]),
+      tmpDir,
+      providerRegistry
+    );
+    expect(providerIssues(issues)).toEqual([
+      expect.objectContaining({
+        level: 'error',
+        nodeId: 'classify',
+        field: 'provider',
+      }),
+    ]);
+    expect(providerIssues(issues)[0].message).toContain("Node 'classify'");
+    expect(providerIssues(issues)[0].hint).toContain('archon ai default');
+    expect(makeWorkflowResult('test', issues).valid).toBe(false);
+  });
+
+  test('accepts a node that selects its provider or a model ref explicitly, with no default', async () => {
+    const config: ValidationConfig = {
+      tiers: { small: { provider: 'claude', model: 'haiku' } } as never,
+      aliases: { '@worker': { provider: 'claude', model: 'haiku' } } as never,
+    };
+    for (const node of [
+      promptNode('classify', { provider: 'claude' }),
+      promptNode('classify', { model: 'small' }),
+      promptNode('classify', { model: '@worker' }),
+    ]) {
+      const issues = await validateWorkflowResources(
+        makeWorkflow('test', [node]),
+        tmpDir,
+        providerRegistry,
+        config
+      );
+      expect(providerIssues(issues)).toEqual([]);
+    }
+  });
+
+  test('a literal model string does not stand in for a provider', async () => {
+    // Runtime keeps the declared provider for a literal spec (node-model-resolution.ts),
+    // so `model: 'claude/opus'` alone still needs a default to run.
+    const issues = await validateWorkflowResources(
+      makeWorkflow('test', [promptNode('classify', { model: 'claude/opus' })]),
+      tmpDir,
+      providerRegistry
+    );
+    expect(providerIssues(issues).map(i => i.nodeId)).toEqual(['classify']);
+  });
+
+  test('a script-only workflow needs no default provider', async () => {
+    const workflow = makeWorkflow('test', [
+      { id: 'run', kind: 'exec', runtime: 'sh', script: 'echo hi' } as DagNode,
+    ]);
+    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry);
+    expect(issues).toEqual([]);
+  });
+
+  test('flags each unresolved AI node once, including loop_group bodies and gate rework', async () => {
+    const workflow = makeWorkflow('test', [
+      {
+        id: 'group',
+        kind: 'loop_group',
+        loop_group: {
+          until_bash: 'exit 0',
+          max_iterations: 1,
+          nodes: [promptNode('body')],
+        },
+      } as unknown as DagNode,
+      dagNodeSchema.parse({
+        id: 'review',
+        approval: { message: 'approve?', on_reject: { prompt: 'fix it' } },
+      }) as DagNode,
+      dagNodeSchema.parse({ id: 'plain-gate', approval: { message: 'approve?' } }) as DagNode,
+    ]);
+    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry);
+    expect(providerIssues(issues).map(i => i.nodeId)).toEqual(['body', 'review']);
+  });
+
+  test('a configured default keeps an unqualified node valid', async () => {
+    const issues = await validateWorkflowResources(
+      makeWorkflow('test', [promptNode('classify')]),
+      tmpDir,
+      providerRegistry,
+      {},
+      'claude'
+    );
+    expect(providerIssues(issues)).toEqual([]);
+  });
+
+  test('validation flags exactly what the runtime resolver rejects with NoDefaultProviderError', async () => {
+    // The install the validator's `defaultProvider` argument mirrors: no assistant anywhere.
+    const config: WorkflowConfig = {
+      assistant: undefined,
+      commands: {},
+      assistants: { claude: {}, codex: {} },
+    };
+    const runtimeThrows = (workflow: ResolvedWorkflow): boolean => {
+      const aiProfile = buildAiProfile(config.assistant, {});
+      const scope = resolveWorkflowModelScope(
+        workflow,
+        config.assistant,
+        assistantModelDefaults(config),
+        aiProfile
+      );
+      try {
+        collectRunCredentialRequirements(providerRegistry, workflow, { config, aiProfile, scope });
+        return false;
+      } catch (error) {
+        if (error instanceof NoDefaultProviderError) return true;
+        throw error;
+      }
+    };
+    // Raw authoring shapes: makeTestResolvedWorkflow parses them through the real schema.
+    for (const nodes of [
+      [{ id: 'classify', prompt: 'decide' }],
+      [{ id: 'classify', prompt: 'decide', provider: 'claude' }],
+    ]) {
+      const workflow = makeTestResolvedWorkflow({ name: 'parity', nodes });
+      const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry);
+      expect(providerIssues(issues).length).toBe(runtimeThrows(workflow) ? 1 : 0);
+    }
   });
 });

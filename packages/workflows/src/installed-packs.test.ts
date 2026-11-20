@@ -294,9 +294,15 @@ nodes:
 
     // Validation resolves the pack's own command and script.
     const review = resolveWorkflowName(REVIEW, definitions) as ResolvedWorkflow;
-    const issues = await validateWorkflowResources(review, project, providerRegistry, {
-      workflowSource: 'installed',
-    });
+    // 'claude' stands in for the install default this fixture assumes; without one the
+    // unqualified prompt nodes below are an error, as they would be at run preflight.
+    const issues = await validateWorkflowResources(
+      review,
+      project,
+      providerRegistry,
+      { workflowSource: 'installed' },
+      'claude'
+    );
     expect(issues.filter(issue => issue.level === 'error')).toEqual([]);
     const scope = review.nodes.find(node => node.id === 'scope');
     if (!scope || !isAgentNode(scope) || scope.source.kind !== 'command') {

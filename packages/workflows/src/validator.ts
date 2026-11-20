@@ -20,6 +20,7 @@ import {
   buildValidationAiProfile,
   collectNodeProviders,
   validateNodeModel,
+  validateProviderResolution,
   validateWorkflowModel,
 } from './validator/models';
 import { validateOutputFormat } from './validator/output-format';
@@ -86,6 +87,7 @@ export async function validateWorkflowResources(
     // runs parseWorkflow, not this resource pass). Kept so a future raw caller can't
     // crash here.
     if (isIncludeDirective(node)) continue;
+    validateProviderResolution(validation, node, provider);
     await validateNodeResources(validation, nodeValidation(validation, node, provider));
   }
 
