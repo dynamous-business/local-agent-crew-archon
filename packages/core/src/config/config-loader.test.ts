@@ -12,6 +12,8 @@ import {
   updateGlobalConfig,
 } from './config-loader';
 import { InvalidConfigError } from './config-validation';
+import { loadProviderConcurrencyCaps } from './provider-concurrency';
+import { ConcurrencyConfigError } from './concurrency-config';
 import {
   mockLogger,
   archonHome,
@@ -826,6 +828,74 @@ assistants:
         'Permission denied'
       );
       expect(mockFsWriteFile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('provider concurrency caps', () => {
+    const fileWithBadCap = `
+botName: MyBot
+concurrency:
+  providers:
+    claude: 0
+`;
+
+    test.each([
+      ['Zero', { claude: 0 }],
+      ['Negative', { claude: -1 }],
+      ['Fractional', { claude: 1.5 }],
+      ['An unregistered provider ID', { nope: 2 }],
+    ])('%s provider cap refuses to be written', async (_case, providers) => {
+      mockFsReadFile.mockResolvedValue('botName: MyBot\n');
+
+      await expect(updateGlobalConfig({ concurrency: { providers } })).rejects.toThrow(
+        /Invalid concurrency config.*concurrency\.providers\./
+      );
+      expect(mockFsWriteFile).not.toHaveBeenCalled();
+    });
+
+    test('refuses an unrelated edit that leaves an invalid provider cap in place', async () => {
+      mockFsReadFile.mockResolvedValue(fileWithBadCap);
+
+      await expect(updateGlobalConfig({ botName: 'UpdatedBot' })).rejects.toThrow(
+        /Invalid concurrency config.*concurrency\.providers\.claude/
+      );
+      expect(mockFsWriteFile).not.toHaveBeenCalled();
+    });
+
+    test('a patch that repairs the cap keeps every unrelated key and admission reads it', async () => {
+      mockFsReadFile.mockResolvedValue(fileWithBadCap);
+
+      await updateGlobalConfig({ concurrency: { providers: { claude: 4 } } });
+
+      const written = Bun.YAML.parse(mockFsWriteFile.mock.calls[0]?.[1] as string);
+      expect(written).toEqual({ botName: 'MyBot', concurrency: { providers: { claude: 4 } } });
+      // Write-side validation and admission must agree, not just two validators.
+      mockFsReadFile.mockResolvedValue(mockFsWriteFile.mock.calls[0]?.[1] as string);
+      expect(await loadProviderConcurrencyCaps()).toEqual(new Map([['claude', 4]]));
+    });
+
+    test.each([
+      ['an empty concurrency key', 'concurrency:', null],
+      ['a null providers key', 'concurrency:\n  providers:', { providers: null }],
+    ])('%s writes and reads as no caps', async (_case, concurrency, expected) => {
+      mockFsReadFile.mockResolvedValue(`botName: MyBot\n${concurrency}\n`);
+
+      await updateGlobalConfig({ botName: 'UpdatedBot' });
+
+      const written = mockFsWriteFile.mock.calls[0]?.[1] as string;
+      expect(Bun.YAML.parse(written)).toEqual({ botName: 'UpdatedBot', concurrency: expected });
+      mockFsReadFile.mockResolvedValue(written);
+      expect(await loadProviderConcurrencyCaps()).toEqual(new Map());
+    });
+
+    test('admission still refuses a hand-written invalid cap file', async () => {
+      mockFsReadFile.mockResolvedValue(fileWithBadCap);
+      await expect(loadProviderConcurrencyCaps()).rejects.toThrow(ConcurrencyConfigError);
+
+      mockFsReadFile.mockResolvedValue('concurrency:\n  providers:\n    nope: 2\n');
+      await expect(loadProviderConcurrencyCaps()).rejects.toThrow(
+        /unknown provider registration ID\(s\) 'nope'/
+      );
     });
   });
 

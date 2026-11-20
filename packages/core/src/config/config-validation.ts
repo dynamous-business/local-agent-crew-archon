@@ -17,6 +17,7 @@ import {
   platformStreamingSchema,
   workflowContinuationConfigSchema,
 } from './config-types';
+import { providerConcurrencySchema, unknownProviderCapIds } from './provider-concurrency';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -204,6 +205,32 @@ export function validateConversationConcurrencyConfig(parsed: unknown, configPat
       'Invalid concurrency config',
       configPath,
       "'concurrency.maxConversations' must be a finite positive integer."
+    );
+  }
+}
+
+/**
+ * The `concurrency.providers` block, checked through the schema and the registration-ID
+ * rule admission itself applies (`provider-concurrency.ts`) — one owner, so a write cannot
+ * persist caps admission would refuse. Only `updateGlobalConfig` calls it: a bad block
+ * already on disk blocks provider attempts, not startup, and the unvalidated patch read
+ * (`readGlobalConfigForUpdate`) lets a repairing write through.
+ */
+export function validateProviderConcurrencyConfig(parsed: unknown, configPath: string): void {
+  if (!isConfigRecord(parsed) || parsed.concurrency == null) return;
+  const result = providerConcurrencySchema.safeParse(parsed);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map(issue => `${issue.path.join('.') || 'concurrency'}: ${issue.message}`)
+      .join('; ');
+    throw new InvalidConfigError('Invalid concurrency config', configPath, issues);
+  }
+  const unknown = unknownProviderCapIds(Object.keys(result.data.concurrency?.providers ?? {}));
+  if (unknown.length > 0) {
+    throw new InvalidConfigError(
+      'Invalid concurrency config',
+      configPath,
+      `unknown provider registration ID(s) ${unknown.map(id => `'concurrency.providers.${id}'`).join(', ')}.`
     );
   }
 }

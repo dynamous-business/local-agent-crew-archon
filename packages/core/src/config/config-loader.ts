@@ -37,6 +37,7 @@ import {
   validateAssistantDefaults,
   validateGlobalConfigBlocks,
   validateModelBindingConfig,
+  validateProviderConcurrencyConfig,
   validateWorkflowContinuationConfig,
 } from './config-validation';
 import {
@@ -474,6 +475,7 @@ export async function updateGlobalConfig(updates: GlobalConfigUpdates): Promise<
     // from the settings UI would otherwise brick every later config load, and a
     // bad block already on disk must be repaired, not kept.
     validateGlobalConfigBlocks(merged, configPath);
+    validateProviderConcurrencyConfig(merged, configPath);
     validateAssistantDefaults(merged, configPath);
 
     // Serialize to YAML and write
