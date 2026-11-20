@@ -13,7 +13,8 @@ import { setPlatformPolicies } from '@archon/core/platforms/registry';
 import { readAsksSettledBindings, readRunEndedBindings } from '@archon/core/workflows/run-ended';
 import { FileStoreUnsupportedError } from '@archon/workflows/file-store';
 import { removeTempTree } from '@archon/paths/test-utils';
-import { packCommand, type PackBindingsOptions } from './pack';
+import { graphText, packCommand, type PackBindingsOptions } from './pack';
+import type { PackGraph } from '@archon/workflows/pack-graph';
 import { triggerConfigSchema } from '@archon/workflows/schemas/resource-start';
 
 const DECLARATION = `bindings:
@@ -570,5 +571,101 @@ describe('archon pack bindings: asks-settled', () => {
     );
     await expect(packCommand('bindings', ['fixture'], options())).rejects.toThrow(reason);
     expect(existsSync(out)).toBe(false);
+  });
+});
+
+const graphStage = (
+  name: string,
+  outcomes: string[],
+  includedBy: string[] = [],
+  startsNothing = outcomes
+): PackGraph['stages'][number] => ({
+  name,
+  returns: 'decide',
+  outcome: {
+    field: 'outcome',
+    form: 'enum',
+    values: outcomes.map(value => ({ value, startsNothing: startsNothing.includes(value) })),
+  },
+  asks: false,
+  includedBy,
+  nodes: [],
+});
+
+const activeArrow = (from: string, outcome: string, to: string): PackGraph['arrows'][number] => ({
+  from: { stage: from, outcome },
+  to,
+  active: true,
+  declared: null,
+  installed: { file: `/t/${from}-${outcome}.json`, sourceInstanceId: 'id', problems: [] },
+});
+
+const graphOf = (stages: PackGraph['stages'], arrows: PackGraph['arrows']): PackGraph => ({
+  pack: 'factory',
+  stages,
+  arrows,
+  fanOutBlocks: [],
+  discoveryErrors: [],
+});
+
+describe('graphText', () => {
+  it('a pack with no includes reads as it did before included blocks were marked', () => {
+    const text = graphText(
+      graphOf(
+        [
+          graphStage('plan', ['planned', 'stop'], [], ['stop']),
+          graphStage('deliver', ['returned'], [], ['returned']),
+        ],
+        [activeArrow('plan', 'planned', 'deliver')]
+      )
+    );
+    expect(text).toBe(
+      [
+        "Pack 'factory': 2 stage(s)",
+        '  plan: planned, stop',
+        '  deliver: returned',
+        '',
+        'Arrows: 1',
+        '  plan:planned -> deliver [active]',
+        '',
+        'Outcomes that start nothing:',
+        '  plan:stop (no asks: ends in silence)',
+        '  deliver:returned (no asks: ends in silence)',
+      ].join('\n')
+    );
+  });
+
+  it('an included-only workflow is marked, and its outcomes are listed apart from the dead ends', () => {
+    const text = graphText(
+      graphOf(
+        [
+          graphStage('deliver', ['returned', 'replan']),
+          graphStage('build', ['ok', 'fail'], ['deliver']),
+        ],
+        []
+      )
+    );
+    expect(text).toContain('  build: ok, fail (included by deliver)');
+    const startsNothing = text
+      .slice(text.indexOf('Outcomes that start nothing:'))
+      .split("Included blocks' outcomes")[0];
+    expect(startsNothing).toContain('  deliver:returned');
+    expect(startsNothing).toContain('  deliver:replan');
+    expect(startsNothing).not.toContain('build:');
+    expect(text).toContain(
+      "Included blocks' outcomes (read by the stage that includes them):\n  build:ok\n  build:fail"
+    );
+  });
+
+  it('an included workflow an arrow touches keeps its dead ends among the rest', () => {
+    const text = graphText(
+      graphOf(
+        [graphStage('deliver', ['returned'], [], []), graphStage('build', ['ok'], ['deliver'])],
+        [activeArrow('deliver', 'returned', 'build')]
+      )
+    );
+    expect(text).toContain('Outcomes that start nothing:');
+    expect(text).toContain('  build:ok (no asks: ends in silence)');
+    expect(text).not.toContain("Included blocks' outcomes");
   });
 });

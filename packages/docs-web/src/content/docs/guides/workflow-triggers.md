@@ -421,6 +421,7 @@ Run-ended bindings need the database store, as items do. With `store: files`, `a
         ]
       },
       "asks": true,
+      "includedBy": [],
       "nodes": [
         { "id": "read", "kind": "agent", "dependsOn": [], "loopGroup": null, "blocks": [], "fanOut": null },
         { "id": "decide", "kind": "agent", "dependsOn": ["read"], "loopGroup": null, "blocks": [], "fanOut": null }
@@ -438,6 +439,7 @@ Run-ended bindings need the database store, as items do. With `store: files`, `a
         ]
       },
       "asks": false,
+      "includedBy": [],
       "nodes": [
         { "id": "rounds", "kind": "loop_group", "dependsOn": [], "loopGroup": null, "blocks": [], "fanOut": null },
         { "id": "rounds.implement", "kind": "agent", "dependsOn": [], "loopGroup": "rounds", "blocks": [], "fanOut": null },
@@ -452,7 +454,7 @@ Run-ended bindings need the database store, as items do. With `store: files`, `a
         { "id": "verdict", "kind": "exec", "dependsOn": ["rounds"], "loopGroup": null, "blocks": [], "fanOut": null }
       ]
     },
-    { "name": "ship", "returns": null, "outcome": null, "asks": false, "nodes": [] }
+    { "name": "ship", "returns": null, "outcome": null, "asks": false, "includedBy": [], "nodes": [] }
   ],
   "arrows": [
     {
@@ -485,6 +487,7 @@ Run-ended bindings need the database store, as items do. With `store: files`, `a
 - A declared binding that names a workflow which is not a stage as the pack loaded keeps the name as written, and its `declared.problems` says so. When that stage failed to load, its load error is in `discoveryErrors`; the rest of the graph is still read.
 - An arrow from an [asks-settled binding](#start-a-stage-again-when-its-asks-are-answered) has `from: { "stage", "settled" }` in place of `outcome`, where `settled` is the binding's `answered`, `withdrawn` or `any`, and `option` when the binding names one ([options](#start-a-different-stage-for-each-option)); a pack binding that lists several options is one arrow per option. It starts nothing for an outcome, so it does not change `startsNothing`.
 - `startsNothing` marks an outcome no active arrow without problems leaves. With `asks: false` such an outcome ends in silence; whether that is right is the pack's call.
+- `includedBy` names the workflows whose nodes include this one as a block (`blocks[].workflow` or `fanOut.workflow`). A workflow only some stage includes, and that no arrow touches, runs inside its includers: the outcome it ends with is read there, so `startsNothing` says nothing a reader needs among the pack's dead ends. The text read lists such a block's outcomes apart, under its own heading; a workflow both included and an arrow's end or launch keeps its dead ends with the rest.
 - `discoveryErrors` lists every workflow that failed to load from the source the pack was read from. A stage that failed is missing from `stages`, so a non-empty list means the graph may be incomplete.
 - When the pack's workflows are not in the checkout, pass `--workflow-source <dir>` (`workflowSource=` on the API), the directory a binding's `launch.discoveryCwd` names. The arrows are still those of the checkout's project.
 

@@ -68,6 +68,13 @@ const packGraphStageSchema = z.object({
     .nullable(),
   /** The stage declares `result.asks`, so a run can end leaving questions on its item. */
   asks: z.boolean(),
+  /**
+   * The workflows whose nodes include this one: names appearing in some stage's or fan-out
+   * body's nodes as `blocks[].workflow` or `fanOut.workflow`. An included workflow's
+   * outcomes are read by its includers; a run-ended binding on them tells the reader
+   * nothing. A workflow listed nowhere is one a run reaches on its own.
+   */
+  includedBy: z.array(z.string()),
   nodes: z.array(packGraphNodeSchema),
 });
 
@@ -434,7 +441,40 @@ function graphArrows(input: GraphInput): PackGraphArrow[] {
   return arrows;
 }
 
-function graphStage(stage: Stage, started: ReadonlySet<string>): PackGraph['stages'][number] {
+/**
+ * Each included workflow's includers: the stage or fan-out body whose nodes name it as
+ * `blocks[].workflow` or `fanOut.workflow`. A fan-out body is scanned too, because a body
+ * can include another body.
+ */
+function includedByMap(
+  stages: readonly Pick<Stage, 'name' | 'nodes'>[],
+  fanOut: PackGraph['fanOutBlocks']
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  const scan = (workflow: string, nodes: readonly GraphNode[]): void => {
+    for (const node of nodes) {
+      const names = new Set([
+        ...node.blocks.map(block => block.workflow),
+        ...(node.fanOut === null ? [] : [node.fanOut.workflow]),
+      ]);
+      for (const name of names) {
+        const includers = map.get(name) ?? [];
+        if (!includers.includes(workflow)) includers.push(workflow);
+        map.set(name, includers);
+      }
+    }
+  };
+  for (const stage of stages) scan(stage.name, stageNodes(stage));
+  for (const block of fanOut) scan(block.workflow, block.nodes);
+  for (const includers of map.values()) includers.sort();
+  return map;
+}
+
+function graphStage(
+  stage: Stage,
+  started: ReadonlySet<string>,
+  includedBy: readonly string[]
+): PackGraph['stages'][number] {
   const declared = declaredOutcome(stage);
   let outcome: PackGraph['stages'][number]['outcome'] = null;
   if (declared !== undefined) {
@@ -453,6 +493,7 @@ function graphStage(stage: Stage, started: ReadonlySet<string>): PackGraph['stag
     returns: stage.returns ?? null,
     outcome,
     asks: stage.result?.asks !== undefined,
+    includedBy: [...includedBy],
     nodes: stageNodes(stage),
   };
 }
@@ -469,11 +510,14 @@ export function buildPackGraph(input: GraphInput): PackGraph {
       .filter(arrow => arrow.active && arrow.installed.problems.length === 0)
       .map(arrow => arrowKey(arrow.from, ''))
   );
+  const fanOut = fanOutBlocks(input.stages, input.workflows);
+  const included = includedByMap(input.stages, fanOut);
   return {
     pack: input.packKey,
-    stages: input.stages.map(stage => graphStage(stage, started)),
+    // Every stage stays listed: one both included and an arrow's end or launch is still a stage.
+    stages: input.stages.map(stage => graphStage(stage, started, included.get(stage.name) ?? [])),
     arrows,
-    fanOutBlocks: fanOutBlocks(input.stages, input.workflows),
+    fanOutBlocks: fanOut,
     discoveryErrors: input.discoveryErrors.map(e => ({
       filename: e.filename,
       workflowName: e.workflowName ?? null,
