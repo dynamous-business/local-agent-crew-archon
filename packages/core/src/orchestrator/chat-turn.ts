@@ -20,7 +20,7 @@ import type { getAgentProvider } from '../services/provider-admission';
 import type { WorkflowCommandSurface } from '@archon/workflows/deps';
 import { getLog } from './agent-log';
 import * as messageDb from '../db/messages';
-import { filterToolIndicators, shiftReplyChunk, type ReplyChunk } from './batch-reply';
+import { composeBatchReply, shiftReplyChunk, type ReplyChunk } from './batch-reply';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -389,7 +389,7 @@ async function collectBatchChunks(input: ChatTurnInput) {
 }
 
 /**
- * Batch mode: accumulate chunks and filter tool indicators, falling back to the originals.
+ * Batch mode: accumulate the reply's text chunks and send one composed message.
  * Used by Slack, GitHub, Discord (batch), and CLI.
  */
 export async function handleBatchMode(input: ChatTurnInput): Promise<void> {
@@ -425,8 +425,7 @@ export async function handleBatchMode(input: ChatTurnInput): Promise<void> {
     'batch_mode_chunks_received'
   );
 
-  // Filter tool indicators and build final message
-  const finalMessage = filterToolIndicators(assistantMessages);
+  const finalMessage = composeBatchReply(assistantMessages);
 
   if (toolFailed) return reportUnansweredToolFailure(input);
 

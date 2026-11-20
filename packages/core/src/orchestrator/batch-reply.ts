@@ -8,7 +8,8 @@ export type ReplyChunk = Pick<
 export function shiftReplyChunk(chunks: ReplyChunk[]): void {
   const oldest = chunks.shift();
   const next = chunks[0];
-  // A retained continuation needs its opener to classify indicator sections.
+  // A retained continuation is incomplete without its opener; merge so dropping the
+  // oldest chunk never drops part of a reply block.
   if (oldest && next?.continuesPreviousBlock) {
     chunks[0] = { ...oldest, text: oldest.text + next.text };
   }
@@ -28,25 +29,22 @@ function replyBlocks(chunks: readonly ReplyChunk[]): string[] {
   return assistantMessages;
 }
 
-export function filterToolIndicators(input: readonly (ReplyChunk | string)[]): string {
+/**
+ * Compose the batched chat reply: merge continuation chunks into blocks, drop blank
+ * blocks, and join the rest with a visible separator.
+ *
+ * Tool-call indicators never appear here: they arrive as `tool_call` provider events,
+ * not as `agent_message_chunk` text, so filtering reply text by emoji (the previous
+ * behavior) could only ever delete model prose.
+ */
+export function composeBatchReply(input: readonly (ReplyChunk | string)[]): string {
   const blocks = replyBlocks(replyChunks(input));
   const separator = '\n\n---\n\n';
 
-  const toolIndicatorRegex =
-    /^(?:\u{1F527}|\u{1F4AD}|\u{1F4DD}|\u{270F}\u{FE0F}|\u{1F5D1}\u{FE0F}|\u{1F4C2}|\u{1F50D})/u;
-
-  // Filter per message so a message left empty drops out with its separator;
-  // filtering the joined text would keep bare `---` sections as content.
-  const finalMessage = blocks
-    .map(message =>
-      message
-        .split('\n\n')
-        .filter(section => !toolIndicatorRegex.test(section.trim()))
-        .join('\n\n')
-    )
+  // Drop empty blocks before joining so an empty block does not leave a bare
+  // `---` separator behind.
+  return blocks
     .filter(message => message.trim() !== '')
     .join(separator)
     .trim();
-
-  return finalMessage || blocks.join(separator);
 }
