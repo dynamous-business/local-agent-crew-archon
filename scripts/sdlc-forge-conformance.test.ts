@@ -58,3 +58,21 @@ test('the forge needs the pack declares are the forge operations it calls', () =
   };
   expect([...pack.forge.operations].sort()).toEqual([...used].sort());
 });
+
+/**
+ * The workflow-level `requires:` gate resolves only a stored per-user GitHub token, so on
+ * it a forge-sourced run against another forge — or GitHub configured only through a forge
+ * plugin — is refused before any work. The pack's forge needs have one owner: the `forge:`
+ * block in `.pack/pack.yaml`, enforced for every run by `assertRunForgeAccess`.
+ */
+test('no SDLC workflow declares requires:', () => {
+  const root = join(import.meta.dir, '../.archon/workflows/sdlc');
+  const offenders = [...new Bun.Glob('**/*.yaml').scanSync({ cwd: root, dot: true })]
+    // The pack manifest is not a workflow; its own schema is owned elsewhere.
+    .filter(file => !file.startsWith('.pack/'))
+    .filter(file => {
+      const doc: unknown = Bun.YAML.parse(readFileSync(join(root, file), 'utf8'));
+      return typeof doc === 'object' && doc !== null && 'requires' in doc;
+    });
+  expect(offenders).toEqual([]);
+});

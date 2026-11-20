@@ -19,8 +19,6 @@ description: |
   NOT for: delivering or fixing a pull request (archon-build-queue, archon-ship), or
   reviewing one by hand (archon-review).
 
-requires: [github]
-
 inputs:
   repo_host:
     default: ""

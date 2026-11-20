@@ -19,8 +19,6 @@ description: |
   triaging an item (archon-intake), delivering one item by hand (archon-ship), or
   merging (archon-merge-queue).
 
-requires: [github]
-
 inputs:
   repo_host:
     default: ""
