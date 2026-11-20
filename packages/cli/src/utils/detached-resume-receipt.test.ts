@@ -6,6 +6,7 @@ import { DETACHED_RUN_FAILED_EXIT_CODE } from './workflow-exit-code';
 import {
   DETACHED_RESUME_CONFIRMATION_MS,
   DETACHED_RESUME_RECEIPT,
+  DETACHED_RESUME_RECEIPT_DRAIN_MS,
   DETACHED_RESUME_RECEIPT_ENV,
   consumeDetachedResumeReceiptRequest,
   waitForDetachedResumeReceipt,
@@ -74,11 +75,33 @@ describe('detached resume acceptance', () => {
     expectReleased(f);
   });
 
+  it('accepts a receipt whose data arrives after child close', async () => {
+    const f = fixture();
+    f.child.emit('exit', 0, null);
+    f.child.emit('close', 0, null);
+    f.pipe.write(DETACHED_RESUME_RECEIPT);
+    await f.result;
+    expectReleased(f);
+  });
+
+  it('accepts fragmented receipt data delivered after child close and pipe end', async () => {
+    const f = fixture();
+    f.child.emit('exit', 0, null);
+    f.child.emit('close', 0, null);
+    f.pipe.write(DETACHED_RESUME_RECEIPT.slice(0, 5));
+    f.pipe.write(DETACHED_RESUME_RECEIPT.slice(5));
+    f.pipe.emit('end');
+    await f.result;
+    expectReleased(f);
+  });
+
   for (const code of [0, 1, DETACHED_RUN_FAILED_EXIT_CODE]) {
     it(`refuses exit ${String(code)} without acceptance`, async () => {
       const f = fixture();
       f.child.emit('exit', code, null);
       f.child.emit('close', code, null);
+      // Child exit closes its end of fd 3, so the pipe reaches EOF.
+      f.pipe.emit('end');
       await expect(f.result).rejects.toThrow(`exit ${String(code)}`);
       expectReleased(f);
     });
@@ -97,6 +120,7 @@ describe('detached resume acceptance', () => {
     f.pipe.write(DETACHED_RESUME_RECEIPT.slice(0, 5));
     f.child.emit('exit', null, 'SIGTERM');
     f.child.emit('close', null, 'SIGTERM');
+    f.pipe.emit('end');
     await expect(f.result).rejects.toThrow('signal SIGTERM');
     expectReleased(f);
   });
@@ -109,9 +133,13 @@ describe('detached resume acceptance', () => {
   });
 
   it('refuses pipe closure without acceptance', async () => {
+    jest.useFakeTimers();
     const f = fixture();
     f.pipe.emit('close');
     f.child.emit('close', null, null);
+    // No `end` ever arrives (fd 3 held by a grandchild): the drain backstop settles
+    // with the exit details instead of waiting for the 60-second confirmation timer.
+    jest.advanceTimersByTime(DETACHED_RESUME_RECEIPT_DRAIN_MS);
     await expect(f.result).rejects.toThrow('No receipt');
     expectReleased(f);
   });
