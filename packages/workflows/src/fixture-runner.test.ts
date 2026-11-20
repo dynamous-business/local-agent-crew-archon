@@ -1263,6 +1263,75 @@ describe('runFixtures', () => {
     expect(report.results.map(r => r.fixture)).toEqual(['ship/fixtures/x.stubs.yaml']);
     expect(report.results[0].expect).toBe('completed');
   });
+
+  /**
+   * A project whose non-bundled scopes each hold a checkable fixture, plus a bundled scope
+   * holding a fixture for a workflow the catalog never loads. Exactly the tree an install
+   * with `defaults.loadDefaultWorkflows: false` produces: the bundled fixture is real, and
+   * its workflow is absent because the project excluded that whole scope.
+   */
+  function writeCrossScopeTree(): {
+    cwd: string;
+    sourceRoots: WorkflowSourceRoots;
+    workflows: WorkflowWithSource[];
+  } {
+    const cwd = makeTempProject();
+    writeWorkflowDirs(cwd, ['ship']);
+
+    const global = makeTempProject();
+    mkdirSync(join(global, 'gpack', 'fixtures'), { recursive: true });
+    // Named after the project's workflow so the fixture resolves against the loaded catalog
+    // the way a globally installed override would; the catalog maps name to workflow.
+    writeFileSync(join(global, 'gpack', 'ship-wf.yaml'), stubWorkflowYaml('ship-wf'));
+    writeFileSync(join(global, 'gpack', 'fixtures', 'g.stubs.yaml'), STUB_FIXTURE);
+
+    const bundled = makeTempProject();
+    mkdirSync(join(bundled, 'sdlc', 'plan', 'fixtures'), { recursive: true });
+    writeFileSync(join(bundled, 'sdlc', 'plan', 'plan-wf.yaml'), stubWorkflowYaml('plan-wf'));
+    writeFileSync(join(bundled, 'sdlc', 'plan', 'fixtures', 'plan.stubs.yaml'), STUB_FIXTURE);
+
+    return {
+      cwd,
+      workflows: workflowsOnDisk(cwd, ['ship-wf'], 'ship'),
+      sourceRoots: {
+        ...liveSourceRoots(cwd),
+        globalWorkflows: global,
+        bundledWorkflows: bundled,
+      },
+    };
+  }
+
+  it('leaves bundled fixtures out of scope when the catalog does not load bundled workflows', async () => {
+    const tree = writeCrossScopeTree();
+
+    const report = await runFixtures({
+      ...tree,
+      sourceConfig: { ...DEFAULT_WORKFLOW_SOURCE_CONFIG, load_default_workflows: false },
+    });
+
+    // Project and global checks survive; the excluded scope contributes nothing, rather
+    // than the `no discovered workflow matches` failure its absent workflow would report.
+    expect(report.results.map(r => r.fixture)).toEqual([
+      'ship/fixtures/ship.stubs.yaml',
+      'gpack/fixtures/g.stubs.yaml',
+    ]);
+    expect(report).toMatchObject({ passed: 2, failed: 0 });
+  });
+
+  it('keeps bundled fixtures in scope — and their failures — when bundled workflows load', async () => {
+    const tree = writeCrossScopeTree();
+
+    const report = await runFixtures({ ...tree });
+
+    const bundled = report.results.find(r => r.fixture === 'sdlc/plan/fixtures/plan.stubs.yaml');
+    // The gate must narrow scope, not suppress errors: a genuine unresolved fixture in an
+    // enabled scope is still reported, with the same reason.
+    expect(bundled).toMatchObject({
+      pass: false,
+      failureReason: 'no discovered workflow matches (plan-wf)',
+    });
+    expect(report).toMatchObject({ passed: 2, failed: 1 });
+  });
 });
 
 describe('discovery and fixture execution agree (#3183)', () => {

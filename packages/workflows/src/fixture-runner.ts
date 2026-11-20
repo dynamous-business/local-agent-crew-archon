@@ -478,10 +478,13 @@ async function disposeExecWorkspace(cwd: string, workspace: string): Promise<voi
 export async function runFixtures(options: RunFixturesOptions): Promise<FixtureReport> {
   const roots = options.sourceRoots ?? liveSourceRoots(options.cwd);
   // Same scope roots discovery reads, project root included as its `.archon/workflows` dir.
+  // The bundled scope is scanned only when the catalog loads it. With
+  // `defaults.loadDefaultWorkflows: false` discovery deliberately excludes those workflows,
+  // and checking their fixtures reports every one as "no discovered workflow matches".
   const all = await discoverFixtures([
     ...(roots.project !== null ? [join(roots.project, '.archon', 'workflows')] : []),
     roots.globalWorkflows,
-    roots.bundledWorkflows,
+    ...(options.sourceConfig.load_default_workflows ? [roots.bundledWorkflows] : []),
   ]);
 
   const byName = new Map(options.workflows.map(ws => [ws.workflow.name, ws]));
