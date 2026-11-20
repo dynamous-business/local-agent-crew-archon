@@ -237,7 +237,7 @@ To turn it off, leave `CADDY_BASIC_AUTH` empty or unset.
    AUTH_USERNAME=admin
    AUTH_PASSWORD_HASH=$$2b$$12$$REPLACE_WITH_YOUR_HASH
    COOKIE_SECRET=REPLACE_WITH_64_HEX_CHARS
-   # COOKIE_MAX_AGE=86400   # session length in seconds
+   # COOKIE_MAX_AGE=86400   # session length in seconds; enforced server-side, and changing AUTH_USERNAME or AUTH_PASSWORD_HASH logs out existing sessions
    ```
 
 4. In `Caddyfile`, uncomment the Option A block (`handle /login`, `handle /logout` and the `forward_auth` handle), and comment out the "No auth" `handle` block below it.
