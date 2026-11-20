@@ -11,9 +11,9 @@
  * - Credentials reach the subprocess via process.env (already cleaned by
  *   stripCwdEnv) PLUS any per-request `requestOptions.env` (per-user delivered
  *   keys/subscriptions), merged LAST so it wins. `buildProviderSubprocessEnv` does NOT
- *   filter tokens — the Claude wrapper logs which posture process.env shows (explicit
- *   token present vs not); the historical env-token allowlist was removed in
- *   #1067, so the log can read "global" while a per-request token authenticates.
+ *   filter tokens — the Claude wrapper logs the credential source that won, derived
+ *   from the env it returns (`claude.auth_source`), so the log cannot disagree with
+ *   what the subprocess authenticates with. Only key names are logged, never values.
  * - CLAUDE_USE_GLOBAL_AUTH is an Archon-only boot sentinel (set for solo
  *   installs with no creds — see server/src/boot/claude-auth-posture.ts). The
  *   Claude CLI itself ignores it; it neither gates nor filters env here.
@@ -73,6 +73,8 @@ function getLog(): ReturnType<typeof createLogger> {
   return cachedLog;
 }
 
+type ClaudeAuthSource = 'delivered' | 'install_token' | 'native_login';
+
 function deliveredClaudeCredential(options: SendQueryOptions | undefined): string | undefined {
   return ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_API_KEY'].find(
     key => options?.userCredentialEnvKeys?.includes(key) && options.env?.[key]
@@ -82,14 +84,6 @@ function deliveredClaudeCredential(options: SendQueryOptions | undefined): strin
 export function buildRequestSubprocessEnv(
   requestOptions: SendQueryOptions | undefined
 ): NodeJS.ProcessEnv {
-  if (requestOptions?.execContext?.kind !== 'container') {
-    const authMode =
-      process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.CLAUDE_API_KEY ? 'explicit' : 'global';
-    getLog().info(
-      { authMode },
-      authMode === 'global' ? 'using_global_auth' : 'using_explicit_tokens'
-    );
-  }
   const env = buildProviderSubprocessEnv(requestOptions);
   const delivered = deliveredClaudeCredential(requestOptions);
   if (delivered) {
@@ -126,6 +120,15 @@ export function buildRequestSubprocessEnv(
   // With it, every refusal with a known cause also ends in an error result carrying
   // `startup_failure_reason`, which classifyClaudeErrorResult turns into a failure class.
   env.CLAUDE_CODE_STARTUP_FAILURE_RESULTS = '1';
+  // Derived from `env`, the object handed to the SDK, so the reported source is the one
+  // that actually authenticates. Container runs get their own env bag, which is why this
+  // must not read process.env. `credential` is a key name, never a value.
+  const authSource: ClaudeAuthSource = delivered
+    ? 'delivered'
+    : env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || env.CLAUDE_API_KEY
+      ? 'install_token'
+      : 'native_login';
+  getLog().info({ authSource, credential: delivered }, 'claude.auth_source');
   return env;
 }
 
