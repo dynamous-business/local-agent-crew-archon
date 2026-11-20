@@ -170,6 +170,28 @@ async function ancestorHoldsResource(
 }
 
 /**
+ * A store read needed to decide or finish admission failed. The admission transaction's
+ * outcome is unknown, so no terminal state is written and no slot is released: report both
+ * failures and the run's identity, and leave the row claimable once the store recovers.
+ */
+async function unconfirmedLaunch(
+  platform: IWorkflowPlatform,
+  conversationId: string,
+  workflowRun: WorkflowRun,
+  resource: string,
+  detail: string,
+  log: Record<string, unknown>
+): Promise<WorkflowExecutionResult> {
+  getLog().error(
+    { ...log, workflowRunId: workflowRun.id, resource },
+    'workflow.resource_state_unconfirmed'
+  );
+  const error = `Resource '${resource}' on run '${workflowRun.id}': ${detail}`;
+  await sendCriticalMessage(platform, conversationId, `❌ **Workflow not started**: ${error}`);
+  return { success: false, workflowRunId: workflowRun.id, error };
+}
+
+/**
  * Take a slot on the workflow's `resource:` before the run is claimed, waiting while the
  * resource is full, or refusing when `noWait` is set. A run a binding admitted already
  * holds its workflow's resource, so it takes no second slot.
@@ -185,7 +207,22 @@ export async function holdWorkflowResource(
 ): Promise<WorkflowExecutionResult | undefined> {
   if (workflow.resource === undefined) return undefined;
   const { name: resource, capacity = DEFAULT_RESOURCE_CAPACITY } = workflow.resource;
-  if (await ancestorHoldsResource(deps, workflowRun, resource)) return undefined;
+  // Reading ancestry is the store's work: a rejection here is a launch failure this layer
+  // must resolve, otherwise the pending row is left with only a thrown error above.
+  let ancestorHolds: boolean;
+  try {
+    ancestorHolds = await ancestorHoldsResource(deps, workflowRun, resource);
+  } catch (error) {
+    return unconfirmedLaunch(
+      platform,
+      conversationId,
+      workflowRun,
+      resource,
+      `admission could not be checked against its ancestors (${errorText(error)}); the run's state could not be confirmed. Please inspect the run before retrying.`,
+      { err: error }
+    );
+  }
+  if (ancestorHolds) return undefined;
   const refuse = (error: string): Promise<WorkflowExecutionResult> =>
     refuseStart(deps, platform, conversationId, workflowRun, error);
   if (!workflowRun.codebase_id) {
@@ -215,29 +252,56 @@ export async function holdWorkflowResource(
       let blocker: ResourceBlocker | null;
       try {
         blocker = await deps.store.admitPendingRun({ resource, capacity, launch });
+        // The blocker reads are store work too. Inside the try, their failure reaches
+        // `endResourceWait` instead of escaping the wait; nothing was admitted on this try,
+        // and that path cancels only while the row is still pending.
+        if (blocker) return { held: await resourceHold(deps, workflowRun, resource, blocker) };
       } catch (error) {
         if (error instanceof InstallHeldError) return { held: installHold(error.hold) };
-        return { done: await endResourceWait(deps, workflowRun, resource, error, refuse) };
+        return {
+          done: await endResourceWait(deps, platform, conversationId, workflowRun, resource, error),
+        };
       }
-      if (!blocker) return { done: undefined };
-      return { held: await resourceHold(deps, workflowRun, resource, blocker) };
+      return { done: undefined };
     },
   });
+}
+
+/** The words an operator reads for a failure that has no better shape. */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
  * Admission threw while the start waited. A run that is no longer pending was stopped by
  * someone else (an operator's cancel), so the wait ends quietly; any other failure
- * refuses the start, so the pending row does not outlive this process.
+ * refuses the start, so the pending row does not outlive this process. When even the run
+ * cannot be read, neither is safe: report the state as unconfirmed.
  */
 async function endResourceWait(
   deps: WorkflowDeps,
+  platform: IWorkflowPlatform,
+  conversationId: string,
   workflowRun: WorkflowRun,
   resource: string,
-  error: unknown,
-  refuse: (error: string) => Promise<WorkflowExecutionResult>
+  error: unknown
 ): Promise<WorkflowExecutionResult> {
-  const current = await deps.store.getWorkflowRun(workflowRun.id);
+  let current: WorkflowRun | null;
+  try {
+    current = await deps.store.getWorkflowRun(workflowRun.id);
+  } catch (readError) {
+    // Reading the row is how this catch learns whether someone else stopped the run. When
+    // that read itself fails, admission threw and its transaction's outcome is unknown:
+    // keep both failures and write nothing.
+    return unconfirmedLaunch(
+      platform,
+      conversationId,
+      workflowRun,
+      resource,
+      `admission failed (${errorText(error)}) and the run's state could not be confirmed (${errorText(readError)}). Please inspect the run before retrying.`,
+      { err: error, readError }
+    );
+  }
   if (current?.status !== 'pending') {
     return {
       success: false,
@@ -249,6 +313,11 @@ async function endResourceWait(
     { err: error, workflowRunId: workflowRun.id, resource },
     'workflow.resource_admission_failed'
   );
-  const reason = error instanceof Error ? error.message : String(error);
-  return refuse(`Resource '${resource}' admission failed: ${reason}`);
+  return refuseStart(
+    deps,
+    platform,
+    conversationId,
+    workflowRun,
+    `Resource '${resource}' admission failed: ${errorText(error)}`
+  );
 }
