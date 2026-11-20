@@ -185,3 +185,54 @@ ${indent(fanOut)}
     });
   });
 });
+
+const OPERATE_RUNNING = join(
+  import.meta.dir,
+  '..',
+  '.claude',
+  'skills',
+  'archon-cli',
+  'operate',
+  'running.md'
+);
+const PREFLIGHT = join(
+  import.meta.dir,
+  '..',
+  'packages',
+  'cli',
+  'src',
+  'commands',
+  'workflow-run-preflight.ts'
+);
+
+/**
+ * The flags `assertContinuationFlags` refuses alongside `--adopt`, read from the refusal
+ * itself so the skill prose and the CLI cannot drift apart.
+ */
+function refusedAdoptionFlags(): string[] {
+  const source = readFileSync(PREFLIGHT, 'utf8').replaceAll('\r\n', '\n');
+  const start = source.indexOf('function assertContinuationFlags');
+  if (start === -1) throw new Error('Missing assertContinuationFlags in workflow-run-preflight.ts');
+  const body = source.slice(start, source.indexOf('\n}', start));
+  const flags = [...body.matchAll(/conflicts\.push\('([^']+)'\)/g)].flatMap(m => m[1].split('/'));
+  expect(flags.length).toBeGreaterThan(0);
+  return flags;
+}
+
+function sectionOf(markdown: string, heading: string): string {
+  const start = markdown.indexOf(heading);
+  if (start === -1) throw new Error(`Missing section: ${heading}`);
+  const next = markdown.indexOf('\n## ', start + heading.length);
+  return next === -1 ? markdown.slice(start) : markdown.slice(start, next);
+}
+
+describe('archon-cli operate/running.md', () => {
+  test('continuing finished work documents --adopt corrections and the refused lane flags', () => {
+    const prose = readFileSync(OPERATE_RUNNING, 'utf8').replaceAll('\r\n', '\n');
+    const section = sectionOf(prose, '## Continuing finished work');
+    expect(section).toContain('--adopt');
+    for (const flag of refusedAdoptionFlags()) expect(section).toContain(flag);
+    // The correction-on-an-open-PR use case is the point of the section.
+    expect(section).toMatch(/pull request/i);
+  });
+});
