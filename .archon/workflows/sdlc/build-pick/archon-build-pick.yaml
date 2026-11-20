@@ -18,8 +18,6 @@ description: |
   NOT for: building one issue by number (archon-build-queue), triaging an item
   (archon-intake), or merging (archon-merge-queue).
 
-requires: [github]
-
 inputs:
   repo_host:
     default: ""
