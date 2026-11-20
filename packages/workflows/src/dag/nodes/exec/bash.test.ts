@@ -23,6 +23,7 @@ import {
   nodeExecCalls,
 } from '../../test-utils';
 import { executeDagWorkflow } from '../../../dag-executor';
+import { runWithRunStartCommit } from '../../../workflow-variables';
 import type { DagNode, ExecNode } from '../../../schemas';
 import { bashInvocation } from '../../../bash-invocation';
 import { CONTAINER_MARKER_PROBE } from '../../../checkout-observation';
@@ -498,6 +499,47 @@ describe('executeDagWorkflow -- bash nodes', () => {
       const envArg = (firstCall?.[2] as { env: NodeJS.ProcessEnv }).env;
       expect(envArg?.USER_MESSAGE).toBe('$(rm -rf /)');
       expect(envArg?.ARGUMENTS).toBe('$(rm -rf /)');
+    } finally {
+      execSpy.mockRestore();
+    }
+  });
+
+  it('delivers RUN_START_COMMIT from the run baseline scope, unshadowable by project env', async () => {
+    const execSpy = spyOnNodeExec().mockResolvedValue({ stdout: 'ok\n', stderr: '' });
+    try {
+      const commit = 'c'.repeat(40);
+      await runWithRunStartCommit(
+        {
+          kind: 'git',
+          sampledAt: '2026-01-01T00:00:00.000Z',
+          commit,
+          tree: 'd'.repeat(40),
+          worktree: { status: 'clean' },
+        },
+        async () =>
+          executeDagWorkflow(
+            dagOptions({
+              deps: createMockDeps(),
+              platform: createMockPlatform(),
+              conversationId: 'conv-rsc',
+              cwd: testDir,
+              workflow: {
+                name: 'run-start-commit',
+                nodes: [{ id: 'peek', kind: 'exec', runtime: 'sh', script: 'echo ok' }],
+              },
+              workflowRun: makeWorkflowRun('run-start-commit-run-id'),
+              config: {
+                ...minimalConfig,
+                envVars: { RUN_START_COMMIT: 'project-shadow' },
+              },
+            })
+          )
+      );
+      const nodeCalls = nodeExecCalls(execSpy.mock.calls);
+      expect(nodeCalls).toHaveLength(1);
+      const envArg = (nodeCalls[0]?.[2] as { env: NodeJS.ProcessEnv }).env;
+      // Engine-reserved: the run row's baseline wins over a project env of the same name.
+      expect(envArg?.RUN_START_COMMIT).toBe(commit);
     } finally {
       execSpy.mockRestore();
     }

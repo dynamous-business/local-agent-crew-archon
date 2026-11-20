@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { packDirOrThrow, type PackDirScope } from './pack-dir';
+import type { CheckoutObservation } from './schemas/checkout-observation';
 import { createLogger } from '@archon/paths';
 import {
   USER_CONTROLLED_VARIABLES,
@@ -74,6 +75,34 @@ export function currentNodeScratchDir(): string | undefined {
   return nodeScratchContext.getStore();
 }
 
+/**
+ * Scope holding `$RUN_START_COMMIT`: the commit the RUN started from, read from the run
+ * row's `checkout_baseline` — never a fresh sample. Entered once by the executor around
+ * DAG execution. Every invocation's own `checkoutStart` (inside `ARCHON_NODE_EXECUTION`)
+ * is re-sampled, so after an earlier node commits it names the new commit; a node that
+ * needs a fixed lower bound for `git diff`/`git log` reads this value instead. A child
+ * sub-run re-enters `executeWorkflow` and shadows the parent's scope with its own
+ * baseline, same as adoption. The stored value is the derived commit: `''` when the
+ * checkout is not a Git repository (`not_git`, `unavailable`, an unborn-branch commit)
+ * or the run predates the column.
+ */
+const runStartCommitContext = new AsyncLocalStorage<string>();
+
+export function runWithRunStartCommit<T>(
+  observation: CheckoutObservation | null | undefined,
+  fn: () => Promise<T>
+): Promise<T> {
+  return runStartCommitContext.run(
+    observation?.kind === 'git' ? (observation.commit ?? '') : '',
+    fn
+  );
+}
+
+/** The run's starting commit (`checkout_baseline.commit`); `''` with no recorded baseline. */
+export function currentRunStartCommit(): string {
+  return runStartCommitContext.getStore() ?? '';
+}
+
 /** Matches what the substitution below replaces as `$PACK_DIR`. */
 export const PACK_DIR_REFERENCE = /\$PACK_DIR/;
 
@@ -110,6 +139,11 @@ export interface TemplateReferences {
  * - $NODE_SCRATCH_DIR - The executing node invocation's own scratch directory (see
  *   {@link runWithNodeScratch}), removed when the invocation ends. Throws outside node
  *   dispatch.
+ * - $RUN_START_COMMIT - The commit the run started from, equal to `checkout_baseline.commit`
+ *   from `archon workflow get <run-id> --json`. Constant across resume, like the baseline
+ *   it reads. Empty when the run's checkout is not a Git repository (or the run predates
+ *   the column); unlike $PACK_DIR/$NODE_SCRATCH_DIR an empty value is truthful, not a
+ *   wiring bug, so it never throws.
  * - $ADOPTED_RUN_DIR (#2747) - The adopted run's artifact directory, resolved
  *   through its persisted `output_root`. Read-only by contract; throws if
  *   referenced without an adoption active.
@@ -245,6 +279,10 @@ export function substituteWorkflowVariables(
       }
       return options.nodeOutcomesFile;
     }),
+    // Engine-controlled like $ARTIFACTS_DIR, so substituted under shellSafe too. Sourced
+    // from the run row's recorded baseline, never a fresh sample, so every node — and
+    // every resume — sees the same commit even after earlier nodes have committed.
+    variable('RUN_START_COMMIT', () => currentRunStartCommit()),
     variable('BASE_BRANCH', () => {
       if (!baseBranch) {
         throw new Error(
