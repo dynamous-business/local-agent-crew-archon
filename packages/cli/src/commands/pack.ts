@@ -643,21 +643,49 @@ function arrowText(arrow: PackGraph['arrows'][number]): string {
   return `  ${from} -> ${arrow.to} [${state}]${note}`;
 }
 
-/** The graph as plain lines; `--json` prints the read itself, which is the contract. */
-function graphText(graph: PackGraph): string {
-  const lines = [`Pack '${graph.pack}': ${String(graph.stages.length)} stage(s)`];
+function stageLine(stage: PackGraph['stages'][number]): string {
+  const values = stage.outcome?.values.map(v => v.value).join(', ');
+  const included =
+    stage.includedBy.length === 0 ? '' : ` (included by ${stage.includedBy.join(', ')})`;
+  return `  ${stage.name}${values === undefined ? ' (no outcome)' : `: ${values}`}${included}`;
+}
+
+/**
+ * The outcomes no active arrow leaves, split: the pack's dead ends, and those of a
+ * workflow only included and touched by no arrow — a block's outcome is read by its
+ * includers, so "starts nothing" tells nothing there.
+ */
+function startNothingLines(graph: PackGraph): { deadEnds: string[]; blocks: string[] } {
+  // A workflow an arrow touches is read by a run-ended binding, so its outcomes that start
+  // nothing are dead ends even when some stage also includes it.
+  const arrowTouched = new Set(graph.arrows.flatMap(arrow => [arrow.from.stage, arrow.to]));
+  const deadEnds: string[] = [];
+  const blocks: string[] = [];
   for (const stage of graph.stages) {
-    const values = stage.outcome?.values.map(v => v.value).join(', ');
-    lines.push(`  ${stage.name}${values === undefined ? ' (no outcome)' : `: ${values}`}`);
+    const startsNothing = (stage.outcome?.values ?? []).filter(value => value.startsNothing);
+    if (stage.includedBy.length > 0 && !arrowTouched.has(stage.name))
+      blocks.push(...startsNothing.map(value => `  ${stage.name}:${value.value}`));
+    else
+      deadEnds.push(
+        ...startsNothing.map(
+          value =>
+            `  ${stage.name}:${value.value}${stage.asks ? '' : ' (no asks: ends in silence)'}`
+        )
+      );
   }
+  return { deadEnds, blocks };
+}
+
+/** The graph as plain lines; `--json` prints the read itself, which is the contract. */
+export function graphText(graph: PackGraph): string {
+  const lines = [`Pack '${graph.pack}': ${String(graph.stages.length)} stage(s)`];
+  for (const stage of graph.stages) lines.push(stageLine(stage));
   lines.push('', `Arrows: ${String(graph.arrows.length)}`);
   for (const arrow of graph.arrows) lines.push(arrowText(arrow));
-  const nothing = graph.stages.flatMap(stage =>
-    (stage.outcome?.values ?? [])
-      .filter(v => v.startsNothing)
-      .map(v => `  ${stage.name}:${v.value}${stage.asks ? '' : ' (no asks: ends in silence)'}`)
-  );
-  if (nothing.length > 0) lines.push('', 'Outcomes that start nothing:', ...nothing);
+  const { deadEnds, blocks } = startNothingLines(graph);
+  if (deadEnds.length > 0) lines.push('', 'Outcomes that start nothing:', ...deadEnds);
+  if (blocks.length > 0)
+    lines.push('', "Included blocks' outcomes (read by the stage that includes them):", ...blocks);
   if (graph.discoveryErrors.length > 0)
     lines.push(
       '',

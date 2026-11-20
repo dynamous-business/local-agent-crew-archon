@@ -131,6 +131,8 @@ describe('a pack graph', () => {
       ['b', true, ['done', 'stuck']],
       ['c', false, ['shipped']],
     ]);
+    // A pack with no includes has no includers anywhere.
+    expect(graph.stages.map(s => s.includedBy)).toEqual([[], [], []]);
   });
 
   test('an asks arrow is active with its file and declared, inactive without one', () => {
@@ -326,6 +328,47 @@ describe('a pack graph', () => {
       { ...plain('check__look', ['build']), blocks },
       { ...plain('check__decide', ['check__look']), blocks },
     ]);
+  });
+
+  test('a workflow another stage includes lists that stage as its includer', () => {
+    const review = wf(
+      'review',
+      [
+        { id: 'look', bash: 'true' },
+        { ...decide(['approve', 'reject']), depends_on: ['look'] },
+      ],
+      { returns: 'decide' }
+    );
+    const deliver = wf(
+      'deliver',
+      [
+        { id: 'start', bash: 'true' },
+        { id: 'check', include: 'review', depends_on: ['start'] },
+      ],
+      { returns: 'check', result: { outcome: 'outcome' } }
+    );
+    const graph = graphOf(stages(review, deliver), { declared: undefined, installed: [] });
+
+    expect(graph.stages.find(s => s.name === 'review')?.includedBy).toEqual(['deliver']);
+    expect(graph.stages.find(s => s.name === 'deliver')?.includedBy).toEqual([]);
+  });
+
+  test('a fan-out body and a body it fans out to list their includers', () => {
+    const fan = (id: string, include: string, dependsOn: string) => ({
+      id,
+      include,
+      depends_on: [dependsOn],
+      fan_out: { items: '$list.output', as: 'x' },
+    });
+    const inner = wf('inner', [{ id: 'leaf', bash: 'true' }]);
+    const body = wf('body', [{ id: 'list', bash: 'echo []' }, fan('more', 'inner', 'list')]);
+    const deliver = wf('deliver', [{ id: 'list', bash: 'echo []' }, fan('fan', 'body', 'list')]);
+    const all = stages(inner, body, deliver);
+    const graph = graphOf(all, { declared: undefined, installed: [] });
+
+    expect(graph.stages.find(s => s.name === 'deliver')?.includedBy).toEqual([]);
+    expect(graph.stages.find(s => s.name === 'body')?.includedBy).toEqual(['deliver']);
+    expect(graph.stages.find(s => s.name === 'inner')?.includedBy).toEqual(['body']);
   });
 
   test('a loop group lists its body, nested groups and included blocks under their step names', () => {
