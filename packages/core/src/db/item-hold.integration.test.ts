@@ -10,6 +10,7 @@ import { executeWorkflow } from '@archon/workflows/executor';
 import type { IWorkflowPlatform, WorkflowDeps } from '@archon/workflows/deps';
 import { makeTestResolvedWorkflow } from '@archon/workflows/test-utils';
 import { providerRegistry } from '@archon/providers';
+import { currentExecutionOwner } from '@archon/workflows/store';
 import { registerBuiltinProviders } from '@archon/providers/in-process';
 import type { PreparedWorkflowLaunch } from '@archon/workflows/schemas/resource-start';
 import { closeDatabase, getDatabase, resetDatabase } from './connection';
@@ -379,8 +380,16 @@ describe('one run of a workflow per item', () => {
       })
     ).toBeNull();
     await getDatabase().query(
-      "UPDATE remote_agent_workflow_runs SET status = 'running' WHERE id = $1",
-      [newer]
+      "UPDATE remote_agent_workflow_runs SET status = 'running', metadata = $2 WHERE id = $1",
+      [
+        newer,
+        // A claim stamps the run's execution owner (workflow-run-transitions.ts); recording
+        // this host is what lets the owner observation call a missing endpoint unreachable.
+        JSON.stringify({
+          ...(await getWorkflowRun(newer))?.metadata,
+          execution_owner: currentExecutionOwner(),
+        }),
+      ]
     );
     await expect(claimPendingWorkflowRun(older)).rejects.toMatchObject({
       name: 'WorkflowItemHeldError',
@@ -390,6 +399,18 @@ describe('one run of a workflow per item', () => {
     const item = await store.getItem(String((await getWorkflowRun(older))?.item_id));
     const read = await readItem(source(), String(item?.projectKey), 'issue-1');
     expect(read?.runs.find(run => run.id === older)?.heldBehind?.runId).toBe(newer);
+
+    // The attention queue names the same holder: the admitted pending older run waits behind
+    // the newer running run, whose owner this process never claimed and cannot see.
+    expect(await store.listWaitedItemHolders()).toMatchObject([{ id: newer, status: 'running' }]);
+    expect(await listAttentionQueue(source())).toEqual([
+      expect.objectContaining({
+        kind: 'owner_lost',
+        observedStatus: 'running',
+        item: expect.objectContaining({ key: 'issue-1' }),
+        run: expect.objectContaining({ id: newer, workflow: 'build' }),
+      }),
+    ]);
   });
 
   test('a failed run on an item resumes only while no other run of its workflow holds the item', async () => {
