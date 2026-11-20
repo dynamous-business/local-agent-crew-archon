@@ -3,6 +3,7 @@ import { afterAll, expect, test } from 'bun:test';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { setLogSink } from '@archon/paths';
 import { removeTempTree, testTimeout } from '@archon/paths/test-utils';
 import { registerBuiltinProviders, registerCommunityProviders } from '@archon/providers/in-process';
 import {
@@ -47,7 +48,12 @@ function workflowSourceFiles(paths: string[]): string[] {
 async function validateCorpus(
   cwd: string,
   defaultAssistant?: string
-): Promise<{ findings: Finding[]; files: string[] }> {
+): Promise<{
+  findings: Finding[];
+  files: string[];
+  logLines: string[];
+  mutatesCheckout: (name: string) => boolean | undefined;
+}> {
   const configPath = join(cwd, '.archon/config.yaml');
   const config = validationSourceConfigSchema.parse(
     (await Bun.file(configPath).exists()) ? Bun.YAML.parse(await readFile(configPath, 'utf8')) : {}
@@ -64,14 +70,26 @@ async function validateCorpus(
       if (typeof value.name === 'string') fileByName.set(value.name, file);
     }
   }
-  const discovered = await discoverWorkflowsWithConfig(
-    cwd,
-    async () => ({
-      ...config,
-      envVars: config.env,
-    }),
-    providerRegistry
-  );
+  // Discovery warns (pino, warn level, default-on) about load-time decisions a corpus
+  // lint cannot see, such as `include.workflow_level_fields_dropped`. The sink captures
+  // every child logger because it redirects the root writer; `mock.module('@archon/paths')`
+  // would not — modules that cached `createLogger` at import time keep the real logger.
+  const logLines: string[] = [];
+  let discovered: Awaited<ReturnType<typeof discoverWorkflowsWithConfig>>;
+  setLogSink(line => logLines.push(line));
+  try {
+    discovered = await discoverWorkflowsWithConfig(
+      cwd,
+      async () => ({
+        ...config,
+        envVars: config.env,
+      }),
+      providerRegistry
+    );
+  } finally {
+    // The sink is process-global.
+    setLogSink(undefined);
+  }
   const findings: Finding[] = discovered.errors.map(error => ({
     file:
       files.find(file => file.endsWith('/' + error.filename) || file === error.filename) ??
@@ -104,7 +122,11 @@ async function validateCorpus(
   );
   findings.push(...validated.flat());
   expect(files.filter(file => !checkedFiles.has(file))).toEqual([]);
-  return { findings, files };
+  // Read off the discovered corpus so a test can assert a declaration survived expansion
+  // without paying for a second discovery.
+  const mutatesCheckout = (name: string): boolean | undefined =>
+    discovered.workflows.find(w => w.workflow.name === name)?.workflow.mutates_checkout;
+  return { findings, files, logLines, mutatesCheckout };
 }
 
 // Validating the whole corpus costs about 14 ms per workflow file on an idle
@@ -126,6 +148,49 @@ test(
   },
   testTimeout(Math.max(5_000, corpusFiles.length * 200))
 );
+
+// The upstream report (Archon #5987): every CLI call warned that the fan-out child
+// `e2e-contract-unit` dropped `mutates_checkout`. The warning fires only when a RESOLVED
+// included child still carries a run-owned workflow-level key after the collapse, so the
+// fix — when it goes red — belongs in the child YAML: move the key to the top-level
+// workflow that is actually started. This locks every include site in the repository, not
+// just the fan-out.
+test(
+  'repository workflows load without dropping a run-owned workflow-level field through an include',
+  async () => {
+    const { logLines, mutatesCheckout } = await validateCorpus(repo, 'claude');
+    expect(logLines.filter(line => line.includes('include.workflow_level_fields_dropped'))).toEqual(
+      []
+    );
+    // The declaration the fan-out keeps on itself — the workflow that is started — must
+    // survive expansion, or the warning-free load above would only mean the field was lost.
+    expect(mutatesCheckout('e2e-contract-fanout')).toBe(false);
+  },
+  testTimeout(Math.max(5_000, corpusFiles.length * 200))
+);
+
+test('the log sink captures a run-owned field an included child still declares', async () => {
+  // Guard for the guard: without a producer this assertion would pass even if the sink
+  // captured nothing.
+  const project = join(root, 'dropped-field');
+  const folder = join(project, '.archon/workflows');
+  await mkdir(folder, { recursive: true });
+  await writeFile(
+    join(folder, 'composer.yaml'),
+    `name: corpus-dropped-field\ndescription: scratch corpus\nnodes:\n  - id: work\n    include: corpus-dropped-child\n`
+  );
+  await writeFile(
+    join(folder, 'child.yaml'),
+    `name: corpus-dropped-child\ndescription: scratch corpus\nmutates_checkout: false\nnodes:\n  - id: body\n    bash: echo hello\n`
+  );
+  const { findings, logLines } = await validateCorpus(project);
+  // Validation errors are separate; this is the load-time warning the corpus lint is blind to.
+  expect(findings).toEqual([]);
+  const warnings = logLines.filter(line => line.includes('include.workflow_level_fields_dropped'));
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]).toContain('"target":"corpus-dropped-child"');
+  expect(warnings[0]).toContain('mutates_checkout');
+});
 
 test('corpus inventory excludes fixtures and identifies SDLC sources with either path separator', () => {
   const paths = [
