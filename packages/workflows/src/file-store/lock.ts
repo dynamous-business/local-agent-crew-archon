@@ -229,29 +229,37 @@ async function tryLink(source: string, target: string): Promise<boolean> {
  * `@archon/paths/process-owner` each loading once per process, as the queue
  * and the owner record are both per copy.
  */
-async function acquire(root: string, timeoutMs: number): Promise<() => Promise<void>> {
+async function acquire(
+  root: string,
+  timeoutMs: number,
+  clock: HandleRetryClock = systemClock
+): Promise<() => Promise<void>> {
   const attempt: LockAttempt = {
     path: join(root, 'lock'),
     breaker: join(root, 'lock.break'),
     candidate: join(root, scratchName('lock')),
-    deadline: Date.now() + timeoutMs,
   };
-  const { path, candidate, deadline } = attempt;
+  const { path, candidate } = attempt;
+  const deadline = clock.now() + timeoutMs;
   let reported = false;
   try {
     await writeOwner(candidate);
     for (;;) {
       if (await tryLink(candidate, path)) return claimLock(path);
-      const owner = await readHolder(path, deadline);
+      const owner = await readHolder(path, deadline, clock);
       if (!owner) continue;
       if (await reclaimStranded(path, owner)) continue;
       if (!reported) {
         log.info({ path, owner }, 'file_store.lock_wait');
         reported = true;
       }
-      if (isOwnerProvablyGone(owner) && (await breakStaleLock(attempt, owner))) continue;
-      if (Date.now() >= deadline) throw new FileStoreLockHeldError(path, owner);
-      await Bun.sleep(5 + Math.floor(Math.random() * 10));
+      const blocked = await blockedBy(attempt, owner);
+      if (!blocked) continue;
+      // The pass's only deadline decision, from one `clock.now()` read, and made after the
+      // block is known. A second read could cross the deadline once the observation that
+      // explains the block has been discarded, and blame the dead lock for a live breaker.
+      if (clock.now() >= deadline) throw new FileStoreLockHeldError(blocked.path, blocked.owner);
+      await clock.sleep(5 + Math.floor(Math.random() * 10));
     }
   } finally {
     await discard(candidate);
@@ -263,7 +271,32 @@ interface LockAttempt {
   readonly breaker: string;
   /** This attempt's owner record, linked to `path` to take the lock and to `breaker` to break it. */
   readonly candidate: string;
-  readonly deadline: number;
+}
+
+/**
+ * What one breaker attempt learned about `lock.break`.
+ * - `broken`: this attempt took the breaker and broke the lock; retry at once.
+ * - `blocked`: a live process holds `breaker`, so no second breaker may act.
+ * - `released`: the breaker name was gone when read, so nothing new was observed; wait.
+ */
+type BreakOutcome =
+  | { kind: 'broken' }
+  | { kind: 'blocked'; by: ProcessOwner }
+  | { kind: 'released' };
+
+/**
+ * The name and owner a pass ends blocked on: the live holder itself, or the live breaker
+ * that holds `lock.break` while a provably-gone owner still holds `lock`. Null when the
+ * pass broke the stale lock and should retry at once.
+ */
+async function blockedBy(
+  attempt: LockAttempt,
+  owner: ProcessOwner
+): Promise<{ path: string; owner: ProcessOwner } | null> {
+  if (!isOwnerProvablyGone(owner)) return { path: attempt.path, owner };
+  const outcome = await breakStaleLock(attempt, owner);
+  if (outcome.kind === 'blocked') return { path: attempt.breaker, owner: outcome.by };
+  return outcome.kind === 'released' ? { path: attempt.path, owner } : null;
 }
 
 /** Records the lock as held; the returned release marks it stranded when removal fails. */
@@ -280,11 +313,15 @@ function claimLock(path: string): () => Promise<void> {
 }
 
 /** The lock's owner, or null when the holder released between our link and read. */
-async function readHolder(path: string, deadline: number): Promise<ProcessOwner | null> {
+async function readHolder(
+  path: string,
+  deadline: number,
+  clock: HandleRetryClock
+): Promise<ProcessOwner | null> {
   const owner = await readOwner(path);
   // Retry at once on null. A name that keeps existing for link but not for read must not
   // outlast the deadline.
-  if (!owner && Date.now() >= deadline) throw new FileStoreLockHeldError(path, null);
+  if (!owner && clock.now() >= deadline) throw new FileStoreLockHeldError(path, null);
   return owner;
 }
 
@@ -299,10 +336,10 @@ async function reclaimStranded(path: string, owner: ProcessOwner | null): Promis
 
 /**
  * Breaks a lock whose owner is provably gone, holding `lock.break` so only one process
- * breaks it. True when the caller should retry at once; false when it should wait.
+ * breaks it. The deadline is the caller's to decide, once per pass.
  */
-async function breakStaleLock(attempt: LockAttempt, owner: ProcessOwner): Promise<boolean> {
-  const { path, breaker, candidate, deadline } = attempt;
+async function breakStaleLock(attempt: LockAttempt, owner: ProcessOwner): Promise<BreakOutcome> {
+  const { path, breaker, candidate } = attempt;
   if (await tryLink(candidate, breaker)) {
     stranded.delete(breaker);
     try {
@@ -311,15 +348,15 @@ async function breakStaleLock(attempt: LockAttempt, owner: ProcessOwner): Promis
     } finally {
       if (!(await discard(breaker))) stranded.add(breaker);
     }
-    return true;
+    return { kind: 'broken' };
   }
   const breakOwner = await readOwner(breaker);
-  if (await reclaimStranded(breaker, breakOwner)) return true;
+  if (await reclaimStranded(breaker, breakOwner)) return { kind: 'broken' };
   // A second automatic breaker would recreate the race this mutex prevents.
-  if (breakOwner && (isOwnerProvablyGone(breakOwner) || Date.now() >= deadline)) {
+  if (breakOwner && isOwnerProvablyGone(breakOwner)) {
     throw new FileStoreLockHeldError(breaker, breakOwner);
   }
-  return false;
+  return breakOwner ? { kind: 'blocked', by: breakOwner } : { kind: 'released' };
 }
 
 /**
@@ -385,7 +422,9 @@ async function sweepScratch(root: string): Promise<void> {
 export async function withFileStoreLock<T>(
   root: string,
   operation: () => Promise<T>,
-  timeoutMs = 10_000
+  timeoutMs = 10_000,
+  /** Internal seam for tests to place the deadline exactly; production uses the system clock. */
+  clock: HandleRetryClock = systemClock
 ): Promise<T> {
   let finish!: () => void;
   const pending = new Promise<void>(resolve => (finish = resolve));
@@ -401,7 +440,7 @@ export async function withFileStoreLock<T>(
   const { key, previous } = await joined;
   await previous;
   try {
-    const release = await acquire(key, timeoutMs);
+    const release = await acquire(key, timeoutMs, clock);
     let result: T;
     try {
       await sweepScratch(key);
