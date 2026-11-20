@@ -464,7 +464,7 @@ describe('registry', () => {
   });
 
   describe('registerOpencodeProvider (community provider)', () => {
-    test('declares capabilities (sessionResume, structuredOutput, agents, toolRestrictions, costReporting supported; untranslated node fields and env injection stay off)', () => {
+    test('declares capabilities (sessionResume, structuredOutput, agents, costReporting supported; untranslated node fields including tool restrictions and env injection stay off)', () => {
       registerOpencodeProvider();
       const caps = getProviderCapabilities('opencode');
       expect(caps.sessionResume).toBe(true);
@@ -474,7 +474,8 @@ describe('registry', () => {
       expect(caps.hooks).toBe(false);
       expect(caps.skills).toBe(false);
       expect(caps.agents).toBe(true);
-      expect(caps.toolRestrictions).toBe(true);
+      // Node-level allowed_tools/denied_tools have no OpenCode request translation.
+      expect(caps.toolRestrictions).toBe(false);
       expect(caps.effortControl).toBe(false);
       expect(caps.costControl).toBe(false);
       expect(caps.costReporting).toBe(true);

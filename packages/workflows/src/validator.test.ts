@@ -6,13 +6,19 @@ import { mkdtemp, mkdir, writeFile, rm, symlink as fsSymlink } from 'fs/promises
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { clearRegistry } from '@archon/providers';
-import { registerBuiltinProviders, registerPiProvider } from '@archon/providers/in-process';
+import {
+  registerBuiltinProviders,
+  registerPiProvider,
+  registerOpencodeProvider,
+} from '@archon/providers/in-process';
 
 // Bootstrap provider registry (needed by capability-driven checks in validator).
-// Pi supplies a provider whose mcp capability is false.
+// Pi supplies a provider whose mcp capability is false. OpenCode supplies one whose
+// toolRestrictions capability is false.
 clearRegistry();
 registerBuiltinProviders();
 registerPiProvider();
+registerOpencodeProvider();
 
 import {
   makeWorkflowResult,
@@ -1722,6 +1728,30 @@ describe('validateWorkflowResources — skills search roots', () => {
     const error = issues.find(issue => issue.field === 'plugins');
     expect(error?.level).toBe('error');
     expect(error?.message).toContain("Provider 'pi' cannot load named plugins");
+  });
+
+  test('tool restrictions on a provider without the capability warn', async () => {
+    // OpenCode applies neither allowed_tools nor denied_tools, so the node's restriction must
+    // produce the ignored-capability warning instead of being silently accepted.
+    const workflow = makeWorkflow(
+      'test',
+      [
+        {
+          id: 'step1',
+          kind: 'agent',
+          source: { kind: 'inline', prompt: 'do work' },
+          allowed_tools: [],
+        } as unknown as DagNode,
+      ],
+      'opencode'
+    );
+
+    const issues = await validateWorkflowResources(workflow, tmpDir, providerRegistry);
+    const warning = issues.find(issue => issue.field === 'allowed_tools/denied_tools');
+    expect(warning?.level).toBe('warning');
+    expect(warning?.message).toContain(
+      "Tool restrictions are not supported by provider 'opencode'"
+    );
   });
 
   test('uses a node model alias provider for Claude skill validation', async () => {
