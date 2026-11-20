@@ -39,6 +39,22 @@ function parse(raw: string): ParsedEvent | null {
 }
 
 /**
+ * Coalescing window for the dashboard-wide invalidations (`runs`, `metrics`).
+ *
+ * A busy instance emits `dag_node` frames continuously, and each `runs` invalidation
+ * fans out to every subscribed list view — one full run-list query per key. Unlike the
+ * per-run streams below, where a refetch is one cheap detail read, this fan-out is
+ * billed by the database, so a background tab must not reload at all and a visible tab
+ * tolerates a second of staleness. Tune here, not at the call sites.
+ */
+export const DASHBOARD_INVALIDATION_MS = 1000;
+
+/** `document.visibilityState` is absent under some test DOMs; treat that as visible. */
+function isHidden(): boolean {
+  return globalThis.document?.visibilityState === 'hidden';
+}
+
+/**
  * Subscribe to the dashboard SSE stream, invalidate the runs feed and metrics reports on any
  * lifecycle change, and report the changed run to `onRunChanged` (keep it
  * stable: a new callback reconnects). Mounted once, at the console root, so
@@ -48,20 +64,62 @@ function parse(raw: string): ParsedEvent | null {
  *   workflow_status   — run created / status changed / completed / failed
  *   dag_node          — active-node lifecycle changes, rendered together on
  *                       each ActiveRunCard
+ *
+ * The list-level invalidations are coalesced through one trailing timer: a hidden tab
+ * gets none until it is shown again (EventSource keeps delivering frames there), and a
+ * visible tab reloads at most once per {@link DASHBOARD_INVALIDATION_MS}. The per-run
+ * signal stays per-event because the attention watcher needs to see each run change.
  */
 export function useDashboardSSE(onRunChanged: (runId: string) => void): void {
   useEffect(() => {
     // Use SSE_BASE_URL so dev bypasses the Vite proxy (which buffers SSE).
     const es = new EventSource(`${SSE_BASE_URL}${DASHBOARD_SSE_PATH}`);
 
+    let runsDirty = false;
+    let metricsDirty = false;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flush = (): void => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      // Refetch every runs:* key (runs:all, runs:project:<id>).
+      if (runsDirty) {
+        invalidate('runs');
+        runsDirty = false;
+      }
+      // Node outputs record metrics, so every metrics:* report may have changed.
+      if (metricsDirty) {
+        invalidate('metrics');
+        metricsDirty = false;
+      }
+    };
+
+    const scheduleFlush = (): void => {
+      if (isHidden()) return;
+      if (flushTimer !== null) return;
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        flush();
+      }, DASHBOARD_INVALIDATION_MS);
+    };
+
+    const onVisibilityChange = (): void => {
+      if (isHidden()) return;
+      // Catch up with exactly one reload for everything that landed while hidden.
+      if (runsDirty || metricsDirty) flush();
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     es.onmessage = (e: MessageEvent<string>): void => {
       const ev = parse(e.data);
       if (ev?.type === undefined || ev.type === 'heartbeat') return;
       if (ev.type === 'workflow_status' || ev.type === 'dag_node') {
-        // Refetch every runs:* key (runs:all, runs:project:<id>).
-        invalidate('runs');
-        // Node outputs record metrics, so every metrics:* report may have changed.
-        invalidate('metrics');
+        runsDirty = true;
+        metricsDirty = true;
+        scheduleFlush();
         // Also refresh any open run-detail cache so the detail page picks
         // up status / node-transition changes without its own SSE round-trip.
         if (typeof ev.runId === 'string') {
@@ -82,6 +140,8 @@ export function useDashboardSSE(onRunChanged: (runId: string) => void): void {
     };
 
     return (): void => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      if (flushTimer !== null) clearTimeout(flushTimer);
       es.close();
     };
   }, [onRunChanged]);
