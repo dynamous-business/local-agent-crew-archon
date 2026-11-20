@@ -46,6 +46,95 @@ function git(cwd: string, ...args: string[]): string {
   return result.stdout.toString().trim();
 }
 
+describe('a worktree lane naming an explicit branch', () => {
+  // A healthy registered worktree for the branch exists, cut from an early commit while the
+  // repository's main has moved on. The start-point rule the CLI applies before reuse must
+  // apply here too: refuse a `fromBranch` the worktree's history does not contain.
+  async function setup(): Promise<{
+    repo: string;
+    worktree: string;
+    cutCommit: string;
+    host: WorkflowHost;
+    adoptions: string[];
+  }> {
+    const root = track(realpathSync(mkdtempSync(join(tmpdir(), 'archon-worktree-lane-'))));
+    const repo = join(root, 'repo');
+    const worktree = join(root, 'lane');
+    Bun.spawnSync(['git', 'init', '-q', '--initial-branch=main', repo]);
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(repo, 'a.txt'), 'a');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-qm', 'a');
+    const cutCommit = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'worktree', 'add', '-qb', 'b', worktree);
+    writeFileSync(join(repo, 'b.txt'), 'b');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-qm', 'b');
+    const env = {
+      id: 'env-1',
+      provider: 'worktree',
+      status: 'active',
+      codebase_id: 'codebase',
+      working_path: worktree,
+      branch_name: 'b',
+      workflow_type: 'task',
+      workflow_id: 'task-b',
+      metadata: {},
+    } as unknown as IsolationEnvironmentRow;
+    const adoptions: string[] = [];
+    const host = {
+      deps: { store: {} },
+      records: {
+        isolation: {
+          findActiveByWorkflow: async () => env,
+          updateMetadata: async (id: string) => {
+            adoptions.push(id);
+          },
+        },
+      },
+    } as unknown as WorkflowHost;
+    return { repo, worktree, cutCommit, host, adoptions };
+  }
+
+  function start(
+    host: WorkflowHost,
+    repo: string,
+    lane: { kind: 'worktree'; branch: string; fromBranch?: string }
+  ) {
+    return executionLane(host, {
+      run: { id: 'started-run', workflow_name: 'build', user_id: null, metadata: {} },
+      lane,
+      codebase: { ...REPO, id: 'codebase', default_cwd: repo } as Codebase,
+      cwd: repo,
+      platformType: 'cli',
+      setupExecutor: (async () => undefined) as never,
+    });
+  }
+
+  test('a fromBranch the worktree does not contain is refused before any adoption', async () => {
+    const { repo, host, adoptions } = await setup();
+    await expect(
+      start(host, repo, { kind: 'worktree', branch: 'b', fromBranch: 'main' })
+    ).rejects.toThrow('not in its history');
+    expect(adoptions).toEqual([]);
+  });
+
+  test('a fromBranch the worktree already contains reuses it', async () => {
+    const { repo, worktree, cutCommit, host, adoptions } = await setup();
+    const lane = await start(host, repo, { kind: 'worktree', branch: 'b', fromBranch: cutCommit });
+    expect(lane.cwd).toBe(worktree);
+    expect(adoptions).toEqual(['env-1']);
+  });
+
+  test('no fromBranch reuses the registered worktree', async () => {
+    const { repo, worktree, host, adoptions } = await setup();
+    const lane = await start(host, repo, { kind: 'worktree', branch: 'b' });
+    expect(lane.cwd).toBe(worktree);
+    expect(adoptions).toEqual(['env-1']);
+  });
+});
+
 describe('a continue hand-off', () => {
   // The environment now registered at the source run's path is on another branch, while
   // the handed-off branch still sits at the handed-off commit.
