@@ -503,6 +503,17 @@ describe('file store filesystem primitives', () => {
     expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(successor);
   });
 
+  // The acquire loop decides the deadline once per pass, from one clock read. Scripted so
+  // the pass that observes the blocker ends exactly at the deadline, instead of racing a
+  // wall-clock timeout that a loaded runner can cross at an arbitrary point.
+  function scriptedClock(...times: number[]): { now(): number; sleep(ms: number): Promise<void> } {
+    let index = 0;
+    return {
+      now: () => times[Math.min(index++, times.length - 1)],
+      sleep: () => Promise.resolve(),
+    };
+  }
+
   test('a live breaker blocks a second breaker of a dead lock', async () => {
     const root = await fixture();
     const live = spawn('await Bun.sleep(60000)', root);
@@ -514,7 +525,11 @@ describe('file store filesystem primitives', () => {
     const breaker = { ...currentProcessOwner, pid: live.pid, instance: randomUUID() };
     await writeFile(join(root, 'lock'), dead);
     await writeFile(join(root, 'lock.break'), JSON.stringify(breaker));
-    const error = await rejection(withFileStoreLock(root, async () => {}, 50));
+    // `now()` starts at 0, so the 50 ms deadline is 50; the pass's single deadline read
+    // lands on it while the live breaker is the observation that explains the block.
+    const error = await rejection(
+      withFileStoreLock(root, async () => {}, 50, scriptedClock(0, 50))
+    );
     expect(error).toBeInstanceOf(FileStoreLockHeldError);
     expect({ ...(error as FileStoreLockHeldError) }).toMatchObject({
       path: join(root, 'lock.break'),
@@ -522,6 +537,23 @@ describe('file store filesystem primitives', () => {
     });
     expect(await readFile(join(root, 'lock'), 'utf8')).toBe(dead);
     expect(JSON.parse(await readFile(join(root, 'lock.break'), 'utf8'))).toEqual(breaker);
+  });
+
+  test('a timeout with no breaker still names lock and its live owner', async () => {
+    const root = await fixture();
+    const live = spawn('await Bun.sleep(60000)', root);
+    const holder = { ...currentProcessOwner, pid: live.pid, instance: randomUUID() };
+    const contents = JSON.stringify(holder);
+    await writeFile(join(root, 'lock'), contents);
+    const error = await rejection(
+      withFileStoreLock(root, async () => {}, 50, scriptedClock(0, 50))
+    );
+    expect(error).toBeInstanceOf(FileStoreLockHeldError);
+    expect({ ...(error as FileStoreLockHeldError) }).toMatchObject({
+      path: join(root, 'lock'),
+      owner: holder,
+    });
+    expect(await readFile(join(root, 'lock'), 'utf8')).toBe(contents);
   });
 
   test('a failed release is reported, and the next call reclaims the lock', async () => {
