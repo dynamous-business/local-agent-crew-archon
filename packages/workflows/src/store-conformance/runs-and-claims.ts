@@ -83,6 +83,31 @@ export function describeRunsAndClaimsConformance(getHarness: () => WorkflowStore
       });
     });
 
+    test.each(['update', 'running-update', 'complete', 'pause', 'resolve'] as const)(
+      '%s drops a top-level null metadata key the way the JSON merge contract says',
+      async writer => {
+        // `SqlDialect.jsonMerge` removes a top-level null key on both dialects; a reader using
+        // `key in metadata` must not see a cleared key on one backend only.
+        const run = await running(store, {
+          metadata: { cleared: 'here', held: { nested: null }, kept: 1 },
+        });
+        const metadata = { cleared: null, held: { inner: null } };
+        if (writer === 'update') await store.updateWorkflowRun(run.id, { metadata });
+        else if (writer === 'running-update')
+          expect(await store.updateWorkflowRunMetadataIfRunning(run.id, metadata)).toBe(true);
+        else if (writer === 'complete')
+          await store.completeWorkflowRun(run.id, { duration_ms: 1 }, metadata);
+        else if (writer === 'pause') await store.pauseWorkflowRun(run.id, approval, metadata);
+        else {
+          await store.pauseWorkflowRun(run.id, approval);
+          expect(await store.resolveApprovalGate(run.id, metadata, [])).toEqual({ resolved: true });
+        }
+        const stored = (await store.getWorkflowRun(run.id))?.metadata;
+        expect(stored).not.toHaveProperty('cleared');
+        expect(stored).toMatchObject({ held: { inner: null }, kept: 1 });
+      }
+    );
+
     test.each(['spawn', null, 42, undefined])(
       'top-level creation strips caller-supplied child provenance: %s',
       async marker => {
