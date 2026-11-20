@@ -73,7 +73,7 @@ for the background-start admission and observation cutoff rules.
 | Skills (`skills:`) | ✅ | ❌ | ❌ | ✅ | ✅ |
 | Plugins (`plugins:`) | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Inline sub-agents (`agents:`) | ✅ | ❌ | ✅¹ | ❌ | ✅ |
-| Tool restrictions (`allowed_tools`/`denied_tools`) | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Tool restrictions (`allowed_tools`/`denied_tools`) | ✅ | ❌ | ❌ | ✅ | ✅ |
 | Structured output (`output_format`) | **enforced** | **enforced** | **enforced** | best-effort | best-effort |
 | Structured-output correction (Archon asks again on a schema miss) | — | same session | — | fresh session | fresh session |
 | Env injection (`env:`) | ✅ | ✅ | ❌ | ✅ | ✅ |

@@ -30,7 +30,15 @@ export const OPENCODE_CAPABILITIES: ProviderCapabilities = {
   skills: false, // top-level nodeConfig.skills has no OpenCode request translation yet
   plugins: false,
   agents: true,
-  toolRestrictions: true,
+  /*
+   * `toolRestrictions: false` — the node-level `allowed_tools`/`denied_tools` fields have no
+   * OpenCode request translation (grep the provider dir for those keys: no match). The
+   * `tools`/`disallowedTools` permission map in `agent-config.ts` is built from
+   * `nodeConfig.agents` Archon agent definitions, not from the node fields. Declaring `true`
+   * would suppress both the validator warning and the dag's ignored-capability warning, so a
+   * node's restrictions would be dropped silently.
+   */
+  toolRestrictions: false,
   structuredOutput: 'enforced', // sends format:{json_schema}; reads info.structured_output
   requiresAllPropertiesRequired: false, // OpenCode does not enforce the required-coverage rule
   // One embedded server is shared by every node and starts with no request env, so a codebase's
