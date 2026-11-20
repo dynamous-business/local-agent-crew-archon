@@ -105,6 +105,23 @@ export function mutableRunMetadata(
   return patch;
 }
 
+/**
+ * The store merge rule (what `SqlDialect.jsonMerge` does on both dialects): a top-level null
+ * in the patch removes that key, nulls nested inside a value are kept, and child provenance
+ * is never changed.
+ */
+export function mergeRunMetadata(
+  existing: Record<string, unknown>,
+  patch: Record<string, unknown> | undefined
+): Record<string, unknown> {
+  const merged = { ...existing };
+  for (const [key, value] of Object.entries(mutableRunMetadata(patch))) {
+    if (value === null) delete merged[key];
+    else merged[key] = structuredClone(value);
+  }
+  return merged;
+}
+
 /** Typed view of the sub-run keys on a run's metadata; each is undefined when unset. */
 export function readSubrunMetadata(metadata: Record<string, unknown> | undefined): {
   parentNodeId: string | undefined;
