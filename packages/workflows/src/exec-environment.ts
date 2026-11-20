@@ -1,6 +1,6 @@
 import type { NodeExecutionMetadata } from './schemas/node-execution';
 import { USER_CONTROLLED_VARIABLES } from './user-controlled-variables';
-import { currentNodeScratchDir, currentPackDir } from './workflow-variables';
+import { currentPackDir, currentNodeScratchDir, currentRunStartCommit } from './workflow-variables';
 import { packDirOrThrow, type PackDirScope } from './pack-dir';
 
 /** The part of a node's execution record its own process may read. */
@@ -62,6 +62,11 @@ export function buildExecNodeEnvironment(context: ExecNodeEnvironmentContext): N
     // present. Deliver it the same way.
     WORKFLOW_ID: context.workflowId,
     BASE_BRANCH: context.baseBranch,
+    // The commit the RUN started from, from the run row's recorded baseline — not this
+    // invocation's checkoutStart, which lives in ARCHON_NODE_EXECUTION and moves once an
+    // earlier node commits. Read from the executor's scope like PACK_DIR so no exec call
+    // site can forget it; empty when the checkout is not a Git repository.
+    RUN_START_COMMIT: currentRunStartCommit(),
     ...userVariables,
     // The listing path, delivered like the other engine-reserved keys: configured
     // project env and node bindings spread before this bag, so neither can shadow it.

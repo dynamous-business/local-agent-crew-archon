@@ -24,7 +24,9 @@ import {
   buildPromptWithContext,
   runWithNodeScratch,
   runWithPackDir,
+  runWithRunStartCommit,
 } from './workflow-variables';
+import type { CheckoutObservation } from './schemas/checkout-observation';
 import { buildExecNodeEnvironment, EXEC_NODE_ENVIRONMENT_NAMES } from './exec-environment';
 import {
   USER_CONTROLLED_VARIABLES,
@@ -95,6 +97,7 @@ describe('user-controlled runtime variable delivery', () => {
         ADOPTED_RUN_DIR: '',
         PACK_DIR: '',
         NODE_SCRATCH_DIR: '',
+        RUN_START_COMMIT: '',
         WORKFLOW_ID: 'run-1',
         BASE_BRANCH: 'dev',
         USER_MESSAGE: value('message'),
@@ -145,6 +148,53 @@ describe('substituteWorkflowVariables', () => {
       )
     );
     expect(prompt).toBe('Work in /scope/dir/wt');
+  });
+
+  const gitObservation = (commit: string | null): CheckoutObservation => ({
+    kind: 'git',
+    sampledAt: '2026-01-01T00:00:00.000Z',
+    commit,
+    tree: commit === null ? null : 'b'.repeat(40),
+    worktree: { status: 'clean' },
+  });
+
+  it('replaces $RUN_START_COMMIT with the run baseline commit inside the run scope', async () => {
+    const commit = 'a'.repeat(40);
+    const { prompt } = await runWithRunStartCommit(gitObservation(commit), async () =>
+      substituteWorkflowVariables(
+        'git diff $RUN_START_COMMIT..HEAD',
+        'run-1',
+        'm',
+        '/tmp',
+        'main',
+        'docs/',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { shellSafe: true }
+      )
+    );
+    // Engine-controlled: substituted even under shellSafe, as a bash body reads it.
+    expect(prompt).toBe(`git diff ${commit}..HEAD`);
+  });
+
+  it('substitutes $RUN_START_COMMIT empty without a usable baseline (no scope, not_git, unavailable, unborn branch)', async () => {
+    const substitute = (observation: CheckoutObservation | null | undefined): Promise<string> =>
+      runWithRunStartCommit(observation, async () =>
+        substituteWorkflowVariables('$RUN_START_COMMIT', 'run-1', 'm', '/tmp', 'main', 'docs/')
+      ).then(r => r.prompt);
+    expect(await substitute(undefined)).toBe('');
+    expect(await substitute(null)).toBe('');
+    expect(await substitute(gitObservation(null))).toBe('');
+    expect(await substitute({ kind: 'not_git', sampledAt: '2026-01-01T00:00:00.000Z' })).toBe('');
+    expect(
+      await substitute({
+        kind: 'unavailable',
+        sampledAt: '2026-01-01T00:00:00.000Z',
+        reason: 'git_failed',
+      })
+    ).toBe('');
   });
 
   it('replaces $WORKFLOW_ID with the run ID', () => {
