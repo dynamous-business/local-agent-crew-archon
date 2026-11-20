@@ -653,8 +653,8 @@ export interface IResourceStartStore {
   listSkippedItemStarts(itemId: string): Promise<SkippedItemStart[]>;
   /**
    * The runs that hold their item (`holdsItem`) while a later start of their workflow on
-   * it waits: a queued start request, or a pending hand start that holds nothing. A holder
-   * the store cannot read is reported `run_unreadable`. A store without items returns none.
+   * it waits: a queued start request, or any pending run, admitted or not. A holder the
+   * store cannot read is reported `run_unreadable`. A store without items returns none.
    */
   listWaitedItemHolders(): Promise<AttentionRead<WorkflowRun>[]>;
   listQueuedResourceStartsForHost(hostId: string): Promise<QueuedResourceStartInspection[]>;

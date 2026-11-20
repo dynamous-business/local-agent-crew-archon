@@ -58,7 +58,7 @@ import { loadResourceCapacities } from '../config/concurrency-config';
 import { insertWorkflowRun } from './workflows';
 import { getLog } from './workflow-run-shared';
 import { normalizeWorkflowRun, type WorkflowRunRow } from './workflow-run-normalization';
-import { holdsItem, itemHolder, itemHolders } from '@archon/workflows/item-hold';
+import { itemHolder, itemHolders } from '@archon/workflows/item-hold';
 import type { WorkflowRun } from '@archon/workflows/schemas/workflow-run';
 import { ensureItem } from './items';
 import { WorkflowStatusReadError } from './workflow-run-reads';
@@ -580,10 +580,11 @@ export async function listWaitedItemHolders(): Promise<AttentionRead<WorkflowRun
     `SELECT id, item_id, launch FROM remote_agent_resource_start_requests
       WHERE status = 'queued' AND item_id IS NOT NULL`
   );
-  const held = itemHolders(runs);
   const waiting = [
+    // Every pending run waits, admitted or not: an older binary can leave an admitted pending
+    // run behind a newer run of its workflow that already holds the item.
     ...runs
-      .filter(run => !holdsItem(run))
+      .filter(run => run.status === 'pending')
       .map(run => ({ runId: run.id, workflow: run.workflow_name, itemId: run.item_id })),
     ...queued.rows.flatMap(row => {
       const launch = preparedWorkflowLaunchSchema.safeParse(parseStoredJson(row.launch));
@@ -594,10 +595,10 @@ export async function listWaitedItemHolders(): Promise<AttentionRead<WorkflowRun
     }),
   ];
   const ids = new Set(
-    waiting.flatMap(start => {
-      const holder = itemHolder(held, start);
-      return holder === undefined ? [] : [holder];
-    })
+    // Each holder is chosen excluding the waiting run itself: it would hide the newer holder.
+    waiting
+      .map(start => itemHolder(itemHolders(runs.filter(r => r.id !== start.runId)), start))
+      .filter((holder): holder is string => holder !== undefined)
   );
   return readRunsForAttention([...ids]);
 }
