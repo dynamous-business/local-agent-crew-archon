@@ -1,6 +1,7 @@
 import type { DagNode, IncludeDirective, WorkflowDefinition } from '../schemas';
 import { isIncludeDirective, isLoopGroupNode } from '../schemas';
 import { buildAiProfile, isAliasRef, isLiteralSpec, resolveModelRef } from '../model-validation';
+import { providerInvocation } from '../dag/capability-preflight';
 import type { ResolvedAiProfile } from '../model-validation';
 import type { ResourceValidation } from './context';
 import type { ValidationConfig, ValidationIssue } from './types';
@@ -123,6 +124,35 @@ function resolveValidationProvider(
   const provider = resolveProvider(node, workflowProvider, validation.defaultProvider);
   if (!('model' in node)) return provider;
   return modelProvider(validation.aiProfile, node.model) ?? provider;
+}
+
+/**
+ * Fail the way execution would: an AI node whose provider chain never resolves throws
+ * NoDefaultProviderError at run preflight (node-model-resolution.ts), so validation must
+ * not call the workflow good. The chain is already computed per node by
+ * {@link collectNodeProviders}; a literal `model:` string deliberately does not rescue the
+ * node, because the runtime keeps the declared (absent) provider for a literal spec.
+ */
+export function validateProviderResolution(
+  validation: ResourceValidation,
+  node: DagNode,
+  provider: string | undefined
+): void {
+  if (provider !== undefined) return;
+  const invocation = providerInvocation(node);
+  // A loop_group never calls a provider itself; its body nodes are visited separately with
+  // the (still unresolved) provider they inherit. A gate without rework never calls one.
+  if (invocation.kind !== 'invokes' && invocation.kind !== 'gate_rework') return;
+  validation.issues.push({
+    level: 'error',
+    nodeId: node.id,
+    field: 'provider',
+    message:
+      invocation.kind === 'gate_rework'
+        ? `Gate '${node.id}' needs a provider for its on_reject rework turn, but none resolves under the current configuration.`
+        : `Node '${node.id}' needs a provider, but none resolves under the current configuration.`,
+    hint: 'Set a default (`defaultAssistant` in .archon/config.yaml, or `archon ai default <provider>`), or select one explicitly with `provider:` or a tier/`@alias` `model:` on the node or the workflow.',
+  });
 }
 
 /**
