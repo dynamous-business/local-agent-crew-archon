@@ -179,8 +179,12 @@ for (const [refusal, attached] of [
         refusal === 'empty conversation' ? '/api/conversations' : '/api/workflows/review-block/run'
       );
     }
-    expect(requests).toHaveLength(conversationRefused ? 1 : 2);
+    // A 4xx from either call proves nothing was queued, so the conversation the card
+    // created first is discarded (#159). A 5xx leaves the outcome unknown — kept.
+    const discarded = !conversationRefused && (detailed || refusal === 'long');
+    expect(requests).toHaveLength((conversationRefused ? 1 : 2) + (discarded ? 1 : 0));
     if (!conversationRefused) expect(requests[1]?.body instanceof FormData).toBe(attached);
+    if (discarded) expect(requests[2]?.url).toBe('/api/conversations/web-test');
   });
 }
 
@@ -211,6 +215,12 @@ test('a required input does not block Start run, and the engine refusal is shown
   // `button` fails on a disabled control: nothing is filled, and the card still sends the start.
   card.button('Start run')();
   await new Promise(resolve => setTimeout(resolve, 0));
-  expect(urls).toEqual(['/api/conversations', '/api/workflows/review-block/run']);
+  // The refusal is a 4xx: nothing was queued, so the conversation the card created is
+  // deleted again rather than left as an empty row (#159).
+  expect(urls).toEqual([
+    '/api/conversations',
+    '/api/workflows/review-block/run',
+    '/api/conversations/web-test',
+  ]);
   expect(card.render()).toContain(refusal.replaceAll("'", '&#x27;'));
 });
