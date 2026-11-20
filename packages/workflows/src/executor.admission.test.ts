@@ -832,3 +832,124 @@ describe('install hold', () => {
     expect(mockExecuteDagWorkflow).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('resource-wait store failures', () => {
+  const pool = makeWorkflow({ resource: { name: 'pool' } });
+  /** A hand start waiting on `pool`: the resource path needs a registered project. */
+  const handStart = (overrides: Partial<WorkflowRun> = {}): WorkflowRun =>
+    makeRun({ status: 'pending', codebase_id: 'codebase-1', ...overrides });
+
+  it('keeps the admission failure and names the run when the recovery read also fails', async () => {
+    const platform = makePlatform();
+    const store = makeStore({
+      createWorkflowRun: mock(async () => handStart()),
+      admitPendingRun: mock(async () => {
+        throw new Error('admission transaction aborted');
+      }),
+      getWorkflowRun: mock(async () => {
+        throw new Error('connection lost');
+      }),
+    });
+    const result = await startWorkflow({ store, platform, workflow: pool });
+    if (result.success) throw new Error('Expected the launch to fail');
+    // Both failures survive: the secondary read error must not replace the admission error.
+    expect(result.error).toContain('admission transaction aborted');
+    expect(result.error).toContain('connection lost');
+    expect(result.error).toContain('run-123');
+    expect(result.error).toContain('pool');
+    expect(result.error).toContain('could not be confirmed');
+    expect(sentMessages(platform).join('\n')).toContain('admission transaction aborted');
+    // The admission transaction's outcome is unknown: no terminal state is guessed.
+    expect(store.cancelWorkflowRun).not.toHaveBeenCalled();
+    expect(store.failWorkflowRun).not.toHaveBeenCalled();
+    expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+  });
+
+  it.each(['getRunAncestry', 'getResourceStartRequest'] as const)(
+    'fails a sub-run launch actionably when %s rejects',
+    async method => {
+      const platform = makePlatform();
+      const store = makeStore({
+        createWorkflowRun: mock(async () => handStart({ parent_run_id: 'parent-run' })),
+        getRunAncestry: mock(async () => [makeRun({ id: 'parent-run', status: 'running' })]),
+        [method]: mock(async () => {
+          throw new Error('store unavailable');
+        }),
+      });
+      const result = await startWorkflow({ store, platform, workflow: pool });
+      if (result.success) throw new Error('Expected the launch to fail');
+      expect(result.error).toContain('run-123');
+      expect(result.error).toContain('pool');
+      expect(result.error).toContain('store unavailable');
+      expect(result.error).toContain('could not be confirmed');
+      expect(sentMessages(platform).join('\n')).toContain('store unavailable');
+      expect(store.admitPendingRun).not.toHaveBeenCalled();
+      expect(store.claimPendingWorkflowRun).not.toHaveBeenCalled();
+      expect(store[method]).toHaveBeenCalledTimes(1);
+      expect(store.cancelWorkflowRun).not.toHaveBeenCalled();
+      expect(store.failWorkflowRun).not.toHaveBeenCalled();
+      expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+    }
+  );
+
+  it('ends the wait through the refusal when reading the blocker fails', async () => {
+    const platform = makePlatform();
+    const store = makeStore({
+      createWorkflowRun: mock(async () => handStart({ item_id: 'item-1' })),
+      admitPendingRun: mock(async () => ({ kind: 'run' as const, id: 'blocker-run' })),
+      getWorkflowRun: mock(async (id: string) => {
+        if (id === 'blocker-run') throw new Error('blocker read failed');
+        return handStart();
+      }),
+      cancelWorkflowRun: mock(async () => ({ cancelled: true })),
+    });
+    const result = await startWorkflow({ store, platform, workflow: pool });
+    if (result.success) throw new Error('Expected the launch to fail');
+    expect(result.error).toContain('blocker read failed');
+    expect(result.error).toContain('pool');
+    // Nothing was admitted on that try, and the row is still pending: cancel it.
+    expect(store.cancelWorkflowRun).toHaveBeenCalledWith(
+      'run-123',
+      { cancel_reason: 'precondition_failed' },
+      { pendingOnly: true }
+    );
+    expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('still ends quietly when a cancelled run surfaces an admission failure', async () => {
+    const platform = makePlatform();
+    const store = makeStore({
+      createWorkflowRun: mock(async () => handStart()),
+      admitPendingRun: mock(async () => {
+        throw new Error('admission transaction aborted');
+      }),
+      getWorkflowRun: mock(async () => handStart({ status: 'cancelled' })),
+    });
+    const result = await startWorkflow({ store, platform, workflow: pool });
+    if (result.success) throw new Error('Expected the launch to fail');
+    expect(result.error).toBe("Run stopped while waiting for resource 'pool' (cancelled).");
+    expect(store.cancelWorkflowRun).not.toHaveBeenCalled();
+    expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('still cancels a pending row when admission fails and the row reads back', async () => {
+    const platform = makePlatform();
+    const store = makeStore({
+      createWorkflowRun: mock(async () => handStart()),
+      admitPendingRun: mock(async () => {
+        throw new Error('admission transaction aborted');
+      }),
+      getWorkflowRun: mock(async () => handStart()),
+      cancelWorkflowRun: mock(async () => ({ cancelled: true })),
+    });
+    const result = await startWorkflow({ store, platform, workflow: pool });
+    if (result.success) throw new Error('Expected the launch to fail');
+    expect(result.error).toBe("Resource 'pool' admission failed: admission transaction aborted");
+    expect(store.cancelWorkflowRun).toHaveBeenCalledWith(
+      'run-123',
+      { cancel_reason: 'precondition_failed' },
+      { pendingOnly: true }
+    );
+    expect(mockExecuteDagWorkflow).not.toHaveBeenCalled();
+  });
+});
