@@ -1,7 +1,7 @@
 import type { StartRunArgs } from '../primitives/launch';
 export type { StartRunArgs } from '../primitives/launch';
 import type { paths } from '../../../lib/api.generated';
-import { requestJson } from '../lib/http';
+import { HttpError, requestJson } from '../lib/http';
 
 type WorkflowRunLaunchJson =
   paths['/api/workflows/{name}/run']['post']['requestBody']['content']['application/json'];
@@ -26,6 +26,9 @@ type WorkflowRunBody = Pick<
  *
  *      With files attached the dispatch route accepts multipart/form-data,
  *      mirroring /api/conversations/:id/message. Without files we use JSON.
+ *
+ *   A refused dispatch (4xx) soft-deletes the conversation created in step 1, so a
+ *   refused start leaves nothing behind (#159). See `discardConversation`.
  */
 export async function startRun({
   projectId,
@@ -50,10 +53,36 @@ export async function startRun({
     ...(hasAliases ? { aliases } : {}),
   } satisfies WorkflowRunBody;
 
-  await requestJson('/api/workflows/{name}/run', 'post', {
-    params: { name: workflow },
-    body: files !== undefined && files.length > 0 ? buildRunForm(body, files) : body,
-  });
+  try {
+    await requestJson('/api/workflows/{name}/run', 'post', {
+      params: { name: workflow },
+      body: files !== undefined && files.length > 0 ? buildRunForm(body, files) : body,
+    });
+  } catch (error: unknown) {
+    // Only a 4xx proves the run was never accepted. Every such answer the run route
+    // gives — bad body, continuation error, admission refusal, upload refusal — comes
+    // before it records the launch message, so the conversation holds no user content
+    // and deleting it destroys nothing. A 5xx or a network failure leaves the outcome
+    // unknown (a run may well be queued), so the conversation is kept.
+    if (error instanceof HttpError && error.status >= 400 && error.status < 500) {
+      await discardConversation(conv.conversationId);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Best-effort cleanup of the conversation a refused start left behind. DELETE is a
+ * soft delete (`deleted_at`), which is enough: every reader filters `deleted_at IS
+ * NULL`, including the console's list. Failures are swallowed — the refusal is the
+ * user-visible answer, and a row that survives is no worse than the bug this fixes.
+ */
+async function discardConversation(conversationId: string): Promise<void> {
+  try {
+    await requestJson('/api/conversations/{id}', 'delete', { params: { id: conversationId } });
+  } catch {
+    // Nothing to report over the refusal that already reached the card.
+  }
 }
 
 function buildRunForm(body: WorkflowRunBody, files: File[]): FormData {

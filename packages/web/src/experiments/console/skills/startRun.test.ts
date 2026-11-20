@@ -173,6 +173,69 @@ describe('startRun — declared inputs (#2554)', () => {
     });
   });
 
+  // A refused start (#159): the card creates the conversation before dispatching, so the
+  // only place that can clean the row up is the caller that made it.
+  test('a 4xx refusal soft-deletes the conversation the start created', async () => {
+    const refusal = "This workflow requires input 'issue', and none was supplied.";
+    stubFetch(400, { error: refusal });
+
+    const launch = startRun({ projectId: 'p1', workflow: 'review-block', message: 'go' });
+
+    await expect(launch).rejects.toMatchObject({ status: 400, serverError: refusal });
+    expect(calls.map(call => call.url)).toEqual([
+      '/api/conversations',
+      '/api/workflows/review-block/run',
+      '/api/conversations/web-test-1',
+    ]);
+    expect(calls[2]?.init?.method?.toUpperCase()).toBe('DELETE');
+  });
+
+  test('a cleanup delete that fails does not replace the engine refusal', async () => {
+    const refusal = "This workflow requires input 'issue', and none was supplied.";
+    stubFetch(400, { error: refusal });
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      calls.push({ url, init });
+      if (url === '/api/conversations')
+        return Promise.resolve(Response.json({ conversationId: 'web-test-1' }));
+      if (init?.method?.toUpperCase() === 'DELETE')
+        return Promise.resolve(Response.json({ error: 'delete failed' }, { status: 500 }));
+      return Promise.resolve(Response.json({ error: refusal }, { status: 400 }));
+    }) as typeof fetch;
+
+    await expect(
+      startRun({ projectId: 'p1', workflow: 'review-block', message: 'go' })
+    ).rejects.toMatchObject({ status: 400, serverError: refusal });
+    expect(calls.map(call => call.url)).toEqual([
+      '/api/conversations',
+      '/api/workflows/review-block/run',
+      '/api/conversations/web-test-1',
+    ]);
+  });
+
+  test('an accepted start keeps its conversation', async () => {
+    stubFetch();
+
+    await startRun({ projectId: 'p1', workflow: 'review-block', message: 'go' });
+
+    expect(calls.map(call => call.url)).toEqual([
+      '/api/conversations',
+      '/api/workflows/review-block/run',
+    ]);
+  });
+
+  test('a 5xx keeps the conversation — the run may have been queued anyway', async () => {
+    stubFetch(502, { error: 'bad gateway' });
+
+    await expect(
+      startRun({ projectId: 'p1', workflow: 'review-block', message: 'go' })
+    ).rejects.toMatchObject({ status: 502 });
+    expect(calls.map(call => call.url)).toEqual([
+      '/api/conversations',
+      '/api/workflows/review-block/run',
+    ]);
+  });
+
   test('launch caps a proxy HTML refusal', async () => {
     const html = `<html><body>${'Bad gateway '.repeat(40)}</body></html>`;
     globalThis.fetch = ((input: RequestInfo | URL) =>
