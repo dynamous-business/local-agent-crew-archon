@@ -526,13 +526,13 @@ describe('chat turn telemetry', () => {
     });
   });
 
-  test('batch truncation preserves a real answer in a warning-split indicator block', async () => {
+  test('batch truncation preserves a real answer in a warning-split continuation block', async () => {
     const answers = Array.from({ length: 19 }, (_, i) => `Answer ${i + 1}`);
     mockSendQuery.mockImplementationOnce(async function* () {
-      yield { type: 'agent_message_chunk', text: '🔧 Running' };
+      yield { type: 'agent_message_chunk', text: 'Preamble' };
       yield { type: 'warning', code: 'pi.extension_notify', message: 'Waiting' };
-      yield { type: 'agent_message_chunk', text: ' tool output', continuesPreviousBlock: true };
-      yield { type: 'agent_message_chunk', text: '\n\nFinal answer', continuesPreviousBlock: true };
+      yield { type: 'agent_message_chunk', text: ' continued', continuesPreviousBlock: true };
+      yield { type: 'agent_message_chunk', text: '\n\nTail', continuesPreviousBlock: true };
       for (const text of answers) yield { type: 'agent_message_chunk', text };
     });
     const platform = makePlatform();
@@ -541,25 +541,26 @@ describe('chat turn telemetry', () => {
     expect(platform.sendMessage).toHaveBeenNthCalledWith(1, 'conv-1', '⚠️ Waiting');
     expect(platform.sendMessage).toHaveBeenLastCalledWith(
       'conv-1',
-      ['Final answer', ...answers].join('\n\n---\n\n')
+      ['Preamble continued\n\nTail', ...answers].join('\n\n---\n\n')
     );
   });
 
   test.each([
-    [18, 1],
-    [19, 1],
-    [20, 1],
-    [21, 1],
-    [19, 25],
+    // [count, fragments, blocks dropped from the front, whether the merged head survives]
+    [18, 1, 0, true],
+    [19, 1, 0, true],
+    [20, 1, 0, false],
+    [21, 1, 1, false],
+    [19, 25, 0, true],
   ])(
-    'batch truncation keeps indicator continuations hidden with %i later blocks and %i fragments',
-    async (count, fragments) => {
+    'batch truncation keeps whole continuation blocks with %i later blocks and %i fragments',
+    async (count, fragments, droppedFront, headSurvives) => {
       const answers = Array.from({ length: count }, (_, i) => `Answer ${i + 1}`);
       mockSendQuery.mockImplementationOnce(async function* () {
-        yield { type: 'agent_message_chunk', text: '🔧 Running' };
+        yield { type: 'agent_message_chunk', text: 'Head' };
         yield { type: 'warning', code: 'pi.extension_notify', message: 'Waiting' };
         for (let i = 0; i < fragments; i++) {
-          yield { type: 'agent_message_chunk', text: ' tool output', continuesPreviousBlock: true };
+          yield { type: 'agent_message_chunk', text: ' tail', continuesPreviousBlock: true };
         }
         for (const text of answers) yield { type: 'agent_message_chunk', text };
       });
@@ -567,12 +568,33 @@ describe('chat turn telemetry', () => {
       (platform.getStreamingMode as ReturnType<typeof mock>).mockReturnValue('batch');
       await handleMessage(platform, 'conv-1', 'hello', { actor: operator });
       expect(platform.sendMessage).toHaveBeenNthCalledWith(1, 'conv-1', '⚠️ Waiting');
-      expect(platform.sendMessage).toHaveBeenLastCalledWith(
-        'conv-1',
-        answers.slice(-20).join('\n\n---\n\n')
-      );
+      const mergedHead = 'Head' + ' tail'.repeat(fragments);
+      const blocks = headSurvives
+        ? [mergedHead, ...answers.slice(droppedFront)]
+        : answers.slice(droppedFront);
+      expect(platform.sendMessage).toHaveBeenLastCalledWith('conv-1', blocks.join('\n\n---\n\n'));
     }
   );
+
+  test('batch mode keeps tool-call indicators out of the composed reply', async () => {
+    mockSendQuery.mockImplementationOnce(async function* () {
+      yield { type: 'tool_call', toolCallId: 't1', name: 'Bash', rawInput: { command: 'pwd' } };
+      yield { type: 'agent_message_chunk', text: '🔍 Findings: the reply stays intact.' };
+      yield { type: 'tool_call', toolCallId: 't2', name: 'Read' };
+      yield { type: 'agent_message_chunk', text: 'Final answer.' };
+      yield { type: 'result', sessionId: 'session-1' };
+    });
+    const platform = makePlatform();
+    (platform.getStreamingMode as ReturnType<typeof mock>).mockReturnValue('batch');
+    await handleMessage(platform, 'conv-1', 'hello', { actor: operator });
+    // tool_call events never reach sendMessage: the only reply is the composed prose,
+    // with the model's own 🔍 paragraph preserved verbatim.
+    expect(platform.sendMessage).toHaveBeenCalledTimes(1);
+    expect(platform.sendMessage).toHaveBeenCalledWith(
+      'conv-1',
+      '🔍 Findings: the reply stays intact.\n\n---\n\nFinal answer.'
+    );
+  });
 
   test('captures exactly one completed chat turn for a plain conversation', async () => {
     mockGetOrCreateConversation.mockReturnValueOnce(
