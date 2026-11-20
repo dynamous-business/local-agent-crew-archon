@@ -8,8 +8,12 @@ import { execFileAsync } from '@archon/git';
 import { trackTempRoots } from '@archon/paths/test-utils';
 
 const trackTempRoot = trackTempRoots();
-// Long enough that a cancel reaches the first run before its grandchild would finish.
-const GRANDCHILD_LIFETIME_MS = 8_000;
+// Grace between the cancel returning and the release signal, so the node subprocess's
+// sub-second status poll has time to notice the cancellation and end its tree.
+const KILL_GRACE_MS = 3_000;
+// After the release, both grandchildren write their marker within one 50 ms poll; this
+// settle window is far larger while still bounded.
+const SETTLE_MS = 1_000;
 // Two in-place runs in one checkout serialize, so each run gets its own project and source.
 const SOURCES = ['first', 'second'] as const;
 
@@ -31,9 +35,10 @@ test('cancelling a run under archon serve ends its script node tree and no other
   const grandchild = join(root, 'grandchild.js');
   await writeFile(
     grandchild,
-    `const { writeFileSync } = require('node:fs');
+    `const { writeFileSync, existsSync } = require('node:fs');
 writeFileSync(process.argv[2], '');
-setTimeout(() => writeFileSync(process.argv[3], ''), ${String(GRANDCHILD_LIFETIME_MS)});\n`
+while (!existsSync(process.argv[4])) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+writeFileSync(process.argv[3], '');\n`
   );
   const modulePath = join(root, 'plugin.mjs');
   await writeFile(
@@ -65,7 +70,7 @@ nodes:
       import { spawn } from 'node:child_process';
       import { join } from 'node:path';
       const marker = name => join(${JSON.stringify(markers)}, process.env.WORKFLOW_ID + '.' + name);
-      const child = spawn(process.execPath, [${JSON.stringify(grandchild)}, marker('started'), marker('leaked')], { stdio: 'ignore' });
+      const child = spawn(process.execPath, [${JSON.stringify(grandchild)}, marker('started'), marker('leaked'), join(${JSON.stringify(markers)}, 'release')], { stdio: 'ignore' });
       await new Promise(resolve => child.once('exit', resolve));
 `
     );
@@ -129,7 +134,6 @@ nodes:
       .filter(name => name.endsWith('.started'))
       .map(name => name.slice(0, -'.started'.length));
   const leaked = (runId: string): boolean => existsSync(join(markers, `${runId}.leaked`));
-  let passed = false;
   try {
     await waitFor(() => {
       serverAlive();
@@ -151,8 +155,6 @@ nodes:
       }, `the ${source} run to start its grandchild`);
       return runId as string;
     };
-    // The cancelled run starts first, so a grandchild that survived its cancel would write
-    // its marker before the other run's grandchild does.
     const cancelledRun = await startRun('first');
     const otherRun = await startRun('second');
 
@@ -161,13 +163,21 @@ nodes:
     });
     expect(cancel.status).toBe(200);
 
+    // Grandchildren only finish once released, so no wall-clock budget races the cancel.
+    // After the grace period the cancelled tree is already dead; the release proves the
+    // property by giving every still-live tree the same chance to write its marker.
+    await Bun.sleep(KILL_GRACE_MS);
+    await writeFile(join(markers, 'release'), '');
+
     await waitFor(() => leaked(otherRun), 'the other run to finish');
+    await Bun.sleep(SETTLE_MS);
     expect(leaked(cancelledRun)).toBe(false);
-    passed = true;
   } finally {
     server.kill('SIGKILL');
     await exited;
-    // A surviving grandchild still writes into the temp tree; let it finish before removal.
-    if (!passed) await Bun.sleep(GRANDCHILD_LIFETIME_MS);
+    // A test that failed before the release must not leave trees waiting on it; release
+    // them and let any survivor write and exit before the temp root is removed.
+    if (existsSync(markers)) await writeFile(join(markers, 'release'), '');
+    await Bun.sleep(SETTLE_MS);
   }
 }, 90_000);
