@@ -33,7 +33,7 @@ import {
 import type { ChildWorkflowOutcome, RunChildWorkflowArgs } from './dag/child-run';
 import type { IWorkflowPlatform, ReleaseVerificationImages, WorkflowDeps } from './deps';
 import type { RunPhase } from './executor-shared';
-import { runWithAdoptedRunDir } from './workflow-variables';
+import { runWithAdoptedRunDir, runWithRunStartCommit } from './workflow-variables';
 import { withContainerArtifactsRoot } from './artifact-writes';
 import { announceRunStart } from './run-start';
 import { WorkflowExecutionHandoffError } from './engine-port';
@@ -361,15 +361,20 @@ export async function executeWorkflow(
 
     // The adopted-dir scope (#2747) encloses only the DAG: a child sub-run spawned
     // from a node re-enters
-    // `executeWorkflow` and scopes its own (absent) adoption.
+    // `executeWorkflow` and scopes its own (absent) adoption. The run-start-commit
+    // scope likewise shadows per sub-run: it carries the run row's recorded
+    // `checkout_baseline` — the sample taken at claim, already re-loaded on a resume —
+    // so no node re-samples the checkout to learn where the run began.
     const dagResult = await runWithAdoptedRunDir(adoptedRunDir, () =>
-      withArtifactWrites(() =>
-        executeDagWorkflow(
-          dagArgs(deps, platform, conversationId, cwd, workflow, workflowRun, opts, {
-            dispatch,
-            paths,
-            workflowSourceRoots,
-          })
+      runWithRunStartCommit(workflowRun.checkout_baseline, () =>
+        withArtifactWrites(() =>
+          executeDagWorkflow(
+            dagArgs(deps, platform, conversationId, cwd, workflow, workflowRun, opts, {
+              dispatch,
+              paths,
+              workflowSourceRoots,
+            })
+          )
         )
       )
     );
