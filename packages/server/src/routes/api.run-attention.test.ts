@@ -727,6 +727,21 @@ describe("answers to a paused run's attention wait by ref over HTTP", () => {
     }
   });
 
+  test('a blank message answer is 400 on a message wait, and the wait stays open', async () => {
+    const run = pausedAt({ form: 'message', options: [] });
+    const calls = mockAnswerAttentionWait.mock.calls.length;
+    try {
+      const blank = await answer(run, {});
+      expect(blank.status).toBe(400);
+      expect(blank.body).toContain('needs your answer');
+      expect((await answer(run, { text: '   ' })).status).toBe(400);
+      // Nothing was recorded, so the wait is still the run's open question.
+      expect(mockAnswerAttentionWait.mock.calls.length).toBe(calls);
+    } finally {
+      mockGetWorkflowRun.mockReset();
+    }
+  });
+
   test("a store failure while recording a valid answer is the server's 500", async () => {
     mockAnswerAttentionWait.mockImplementationOnce(async () => {
       throw new Error('db down');

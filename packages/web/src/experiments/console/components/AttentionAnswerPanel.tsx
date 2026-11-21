@@ -138,6 +138,8 @@ export function AttentionAnswerForm({
                 disabled={
                   busy ||
                   (fields.form === 'multi_select' && chosen.length === 0) ||
+                  // Early hint only: the server refuses a blank message answer too
+                  // (attentionAnswerProblem), so this saves a round trip.
                   (fields.form === 'message' && text.trim() === '')
                 }
                 onClick={() => void answer(chosen)}

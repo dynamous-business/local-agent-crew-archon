@@ -602,6 +602,76 @@ test('--recommended answers as the declared answerer, and the notices watch says
   });
 });
 
+test('workflow answer refuses a blank message on a message wait, and the wait stays open', async () => {
+  const root = track(mkdtempSync(join(tmpdir(), 'attention-blank-message-cli-')));
+  process.env.ARCHON_HOME = join(root, 'home');
+  const host = createHost();
+  const { store } = host.deps;
+  mkdirSync(join(root, 'alpha'));
+  const dir = realpathSync(join(root, 'alpha'));
+  const run = await store.createWorkflowRun({ workflow_name: 'ci', user_message: '' });
+  await store.claimPendingWorkflowRun(run.id);
+  await store.pauseWorkflowRunForWait(
+    run.id,
+    {
+      owner: 'node',
+      nodeId: 'ask',
+      kind: 'attention',
+      waitingSince: new Date().toISOString(),
+      message: 'What should the next stage do?',
+      pauseId: `pause-${run.id}`,
+      form: 'message',
+    },
+    { kind: 'started', stepName: 'ask' }
+  );
+  // `workflow answer <id> --occurrence <o>` with no --choose and no --text, and the same
+  // with whitespace text, are refused; only a real message settles the wait.
+  const blank = await captured(() =>
+    workflowCommands.workflowAnswerCommand(
+      host,
+      run.id,
+      `pause-${run.id}`,
+      { choose: [] },
+      undefined,
+      true,
+      dir
+    )
+  );
+  expect(blank).toMatchObject({
+    code: 1,
+    json: { ok: false, error: expect.stringContaining('needs your answer') },
+  });
+  expect(
+    await captured(() =>
+      workflowCommands.workflowAnswerCommand(
+        host,
+        run.id,
+        `pause-${run.id}`,
+        { choose: [] },
+        '   ',
+        true,
+        dir
+      )
+    )
+  ).toMatchObject({ code: 1 });
+  expect((await store.getWorkflowRun(run.id))?.metadata?.wait).not.toHaveProperty('answer');
+  const answered = await captured(() =>
+    workflowCommands.workflowAnswerCommand(
+      host,
+      run.id,
+      `pause-${run.id}`,
+      { choose: [] },
+      'Ship it.',
+      true,
+      dir
+    )
+  );
+  expect(answered).toMatchObject({
+    code: 0,
+    json: { ok: true, answer: { text: 'Ship it.' } },
+  });
+});
+
 test('watch streams the queue by project, refuses list-only flags, and exits 4 on a foreign cursor', async () => {
   const root = track(mkdtempSync(join(tmpdir(), 'attention-watch-cli-')));
   process.env.ARCHON_HOME = join(root, 'home');

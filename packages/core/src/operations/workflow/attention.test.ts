@@ -139,6 +139,8 @@ describe('answering an attention wait', () => {
 
   const refusals = [
     ['message', { choose: ['a'] }, 'takes only text'],
+    ['message', { choose: [] }, 'needs your answer'],
+    ['message', { choose: [], text: '   ' }, 'needs your answer'],
     ['approval', { choose: ['maybe'] }, "does not declare option 'maybe'"],
     ['approval', { choose: [] }, 'takes exactly one option'],
     ['select', { choose: ['c'] }, "does not declare option 'c'"],
