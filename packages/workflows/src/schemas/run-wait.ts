@@ -237,16 +237,22 @@ export function attentionOptions(wait: AttentionDeclaration): readonly Attention
 
 /**
  * Why choosing `choose` does not answer a wait in `form` that declares the option ids
- * `declared`, or undefined when it does: a message takes only text; approval and select
+ * `declared`, or undefined when it does: a message takes only non-empty text; approval and select
  * take exactly one declared option; multi_select takes one or more distinct declared
  * options.
  */
 function attentionChoiceProblem(
   form: AttentionForm,
   declared: readonly string[],
-  choose: readonly string[]
+  choose: readonly string[],
+  text: string
 ): string | undefined {
-  if (form === 'message') return choose.length > 0 ? 'takes only text, not an option.' : undefined;
+  if (form === 'message') {
+    if (choose.length > 0) return 'takes only text, not an option.';
+    return text.trim() === ''
+      ? 'needs your answer: type the message the wait asks for.'
+      : undefined;
+  }
   const undeclared = choose.filter(id => !declared.includes(id));
   if (undeclared.length > 0)
     return `does not declare option '${undeclared.join("', '")}'. Declared options: ${declared.join(', ')}.`;
@@ -284,7 +290,7 @@ export function attentionAnswerProblem(
 ): string | undefined {
   const declared = attentionOptions(wait).map(option => option.id);
   return (
-    attentionChoiceProblem(attentionForm(wait), declared, answer.choose) ??
+    attentionChoiceProblem(attentionForm(wait), declared, answer.choose, answer.text) ??
     otherTextProblem(wait.other, answer.choose, answer.text)
   );
 }
