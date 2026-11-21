@@ -1,11 +1,13 @@
 import { providerRegistry } from '@archon/providers';
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { parseFixtureFile } from '../packages/workflows/src/fixture-runner';
 import { parseWorkflow } from '../packages/workflows/src/loader';
 import { parseWhenAtom } from '../packages/workflows/src/when-atom';
 
+const SKILL_DIR = join(import.meta.dir, '..', '.claude', 'skills', 'archon-cli');
+const WORKFLOWS_DIR = join(import.meta.dir, '..', '.archon', 'workflows');
 const NODE_REFERENCE = join(
   import.meta.dir,
   '..',
@@ -183,5 +185,42 @@ ${indent(fanOut)}
     expect(parseFixtureFile(fixture, 'documented.stubs.yaml').declaration.inputs).toEqual({
       branch: 'task-42',
     });
+  });
+});
+
+function walkMarkdown(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...walkMarkdown(path));
+    else if (entry.name.endsWith('.md')) files.push(path);
+  }
+  return files;
+}
+
+function workflowNames(dir: string): Set<string> {
+  const names = new Set<string>();
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) for (const name of workflowNames(path)) names.add(name);
+    else if (entry.name.endsWith('.yaml')) names.add(entry.name.slice(0, -'.yaml'.length));
+  }
+  return names;
+}
+
+describe('archon-cli workflow references', () => {
+  // A run of a workflow the skill names must exist. `archon-` is the pack's prefix, so
+  // placeholders like `<workflow>` or `my-workflow` are not references to shipped
+  // workflows; the regex already skips `<…>`, `$R` and other non-token forms.
+  test('every workflow the skill names is a shipped workflow', () => {
+    const shipped = workflowNames(WORKFLOWS_DIR);
+    const missing: string[] = [];
+    for (const file of walkMarkdown(SKILL_DIR)) {
+      const text = readFileSync(file, 'utf8');
+      for (const match of text.matchAll(/archon workflow run (archon-[a-z0-9][a-z0-9-]*)/g)) {
+        if (!shipped.has(match[1])) missing.push(`${relative(SKILL_DIR, file)}: ${match[1]}`);
+      }
+    }
+    expect(missing).toEqual([]);
   });
 });
