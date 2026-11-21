@@ -687,7 +687,7 @@ Signup uses email + password (no email verification by default). **Signup postur
 | `AUTH_PASSWORD_HASH` | Bcrypt hash for form-based auth password (escape `$` as `$$` in Compose) | -- |
 | `COOKIE_SECRET` | 64-hex-char secret for auth session cookies | -- |
 | `AUTH_SERVICE_PORT` | Port for the auth service container | `9000` |
-| `COOKIE_MAX_AGE` | Auth cookie lifetime in seconds | `86400` |
+| `COOKIE_MAX_AGE` | Auth cookie lifetime in seconds, enforced server-side; changing `AUTH_USERNAME` or `AUTH_PASSWORD_HASH` logs out existing sessions | `86400` |
 
 ### Telemetry
 

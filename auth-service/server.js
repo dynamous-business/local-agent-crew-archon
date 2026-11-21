@@ -31,13 +31,26 @@ try {
   process.exit(1);
 }
 
-// ── Cookie helpers ─────────────────────────────────────────────────────────────
+// ── Cookie helpers ───────────────────────────────────────────────────────────
+// Short fingerprint of the credentials, signed with COOKIE_SECRET. Truncated
+// (16 base64url chars) to keep the cookie compact; unusable without the secret.
+// Baking it into the session payload means changing AUTH_USERNAME or
+// AUTH_PASSWORD_HASH invalidates previously issued sessions.
+const CRED_FINGERPRINT = createHmac('sha256', COOKIE_SECRET)
+  .update(`${USERNAME}\n${PASSWORD_HASH}`)
+  .digest('base64url')
+  .slice(0, 16);
+
 function signCookie(value) {
   const sig = createHmac('sha256', COOKIE_SECRET).update(value).digest('base64url');
   return `${value}.${sig}`;
 }
 
-function verifyCookie(signed) {
+// Session payload format: `authenticated.<expUnixSeconds>.<credFingerprint>`.
+// The signature is the segment after the last dot, so any payload verifies.
+// Returns 'authenticated' for a live session, null otherwise. `now` is
+// injectable for tests.
+function verifyCookie(signed, now = Math.floor(Date.now() / 1000)) {
   const dot = signed.lastIndexOf('.');
   if (dot === -1) return null;
   const value = signed.slice(0, dot);
@@ -46,7 +59,14 @@ function verifyCookie(signed) {
   const expBuf = Buffer.from(expected, 'base64url');
   if (sigBuf.length !== expBuf.length) return null;
   if (!timingSafeEqual(sigBuf, expBuf)) return null; // constant-time
-  return value;
+  // Enforce lifetime and credential binding server-side; the Max-Age cookie
+  // attribute is only a browser instruction and never checked here.
+  const parts = value.split('.');
+  if (parts.length !== 3 || parts[0] !== 'authenticated') return null;
+  const exp = Number(parts[1]);
+  if (!Number.isFinite(exp) || exp <= now) return null;
+  if (parts[2] !== CRED_FINGERPRINT) return null;
+  return parts[0];
 }
 
 function parseCookies(header) {
@@ -177,7 +197,8 @@ async function handleLogin(req, res) {
     return res.end(loginPage(encodeURIComponent(safeRd), 'Invalid username or password.'));
   }
 
-  const cookieValue = signCookie('authenticated');
+  const exp = Math.floor(Date.now() / 1000) + COOKIE_MAX_AGE;
+  const cookieValue = signCookie(`authenticated.${exp}.${CRED_FINGERPRINT}`);
   res.writeHead(302, {
     Location: safeRd,
     'Set-Cookie': `${COOKIE_NAME}=${cookieValue}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE}`,
@@ -239,4 +260,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { signCookie, verifyCookie, isSafeRedirect, parseCookies };
+module.exports = { signCookie, verifyCookie, isSafeRedirect, parseCookies, CRED_FINGERPRINT };
