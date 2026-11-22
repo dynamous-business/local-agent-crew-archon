@@ -26,6 +26,7 @@ export class GitHubSetupFixture {
   keyPath!: string;
   allowedUsers!: string | symbol;
   savedHome!: string | undefined;
+  inherited: NodeJS.ProcessEnv = {};
   authMode!: 'app' | 'pat';
   keySource!: 'path' | 'inline';
   switchAnswer!: boolean | symbol;
@@ -38,12 +39,19 @@ export class GitHubSetupFixture {
   cancelled = Symbol('cancelled');
   nativeIsCancel = prompts.isCancel;
   run = (force = false) =>
-    setupCommand({ repoPath: this.root, scope: this.scope, providers: [], force });
+    setupCommand({
+      repoPath: this.root,
+      scope: this.scope,
+      providers: [],
+      force,
+      inheritedEnv: this.inherited,
+    });
   read = () => parseDotenv(readFileSync(this.target, 'utf8'));
 
   constructor() {
     beforeEach(() => {
       this.root = mkdtempSync(join(tmpdir(), 'archon-setup-github-'));
+      this.inherited = {};
       this.savedHome = process.env.ARCHON_HOME;
       process.env.ARCHON_HOME = join(this.root, 'home');
       mkdirSync(join(this.root, 'home'));
